@@ -1,0 +1,24 @@
+[package]
+name = "hydra-example-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Minimal solana-program integrator that creates a Hydra crank via CPI."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hydra-api = { workspace = true, features = ["cpi-native"] }
+
+solana-account-info = "3"
+solana-program-entrypoint = "3"
+solana-program-error = "3"
+solana-pubkey = { workspace = true }
+
+[dev-dependencies]
+hydra-api = { workspace = true, features = ["client"] }
+mollusk-svm = { workspace = true }
+solana-account = { workspace = true }
+solana-instruction = { workspace = true }

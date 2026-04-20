@@ -1,0 +1,30 @@
+[toolchain]
+anchor_version = "1.0.0"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+hydra_example_anchor = "Xyj597GykzwSu44muqNHtYs2aKUgm9ydNoHNySTDFs5"
+
+[programs.devnet]
+hydra_example_anchor = "Xyj597GykzwSu44muqNHtYs2aKUgm9ydNoHNySTDFs5"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+# The mollusk test lives inside the program crate (tests/mollusk.rs).
+# Mollusk runs in-process — no validator, no deploy — so invoke via:
+#
+#   anchor test --skip-local-validator --skip-deploy
+#
+# (Plain `anchor test` spins up a local validator and tries to deploy,
+#  which is unnecessary; adding those two flags makes Anchor skip both
+#  and just run this script.)
+test = "cargo test --manifest-path programs/hydra-example-anchor/Cargo.toml --test mollusk -- --nocapture"

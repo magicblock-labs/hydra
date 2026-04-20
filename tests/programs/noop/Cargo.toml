@@ -1,0 +1,16 @@
+[package]
+name = "hydra-noop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A minimal pinocchio no-op program, used as a scheduled-ix target in Hydra's CU tests."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pinocchio = { workspace = true }
+
+[package.metadata.solana]
+program-id = "4sdZFwGE7TkQCJVpfggvfy2ZwGNCfF6hAMJYjZU5HpZG"

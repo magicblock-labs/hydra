@@ -1,0 +1,36 @@
+[package]
+name = "hydra-example-anchor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal Anchor program that creates a Hydra crank via CPI."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "hydra_example_anchor"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = "1.0"
+
+# Path to the Hydra workspace's api crate (three levels up).
+# `cpi-native` pulls in `solana_cpi::invoke_signed` + the builders.
+hydra-api = { path = "../../../../crates/hydra-api", features = ["cpi-native"] }
+
+[dev-dependencies]
+# Mollusk integration harness. Matching version pin as the main Hydra
+# workspace so the shared Solana runtime types unify.
+mollusk-svm = "=0.12.1-agave-4.0"
+solana-account = "3"
+solana-instruction = "3"
+solana-pubkey = "4"
+# Host-side builders + PDA helpers.
+hydra-api = { path = "../../../../crates/hydra-api", features = ["client"] }

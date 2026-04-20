@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish-hydra-api:
+    name: Publish hydra-api to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Guard against drift between the git tag and the published version.
+      # Expects tags of the form `vX.Y.Z` matching `hydra-api`'s Cargo.toml.
+      - name: Verify tag matches crate version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.name == "hydra-api") | .version')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag '${GITHUB_REF_NAME}' (=$TAG) does not match hydra-api version '$VERSION'"
+            exit 1
+          fi
+          echo "Publishing hydra-api@$VERSION"
+
+      # Package-level validation: ensures the crate is self-contained
+      # (no path-only deps, no missing files in the manifest, etc.) before
+      # we hit the actual publish endpoint. Fails fast with a clear error.
+      - name: Dry-run publish
+        run: cargo publish -p hydra-api --all-features --dry-run
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p hydra-api

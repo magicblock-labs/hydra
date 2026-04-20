@@ -1,0 +1,35 @@
+[package]
+name = "hydra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hydra — permissionless Solana crank"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Gates all `pinocchio_log::log!` invocations at compile time so release
+# builds emit no log strings.
+logging = []
+# Skip the on-chain entrypoint when this crate is consumed as a library
+# (e.g. by integration tests that already loaded the .so separately).
+no-entrypoint = []
+# Emits `sol_log_compute_units` checkpoints through the Trigger hot path.
+# Each checkpoint costs ~110 CU, so the visible Trigger CU ~doubles — only
+# enable when profiling.
+cu-trace = []
+
+[dependencies]
+pinocchio = { workspace = true }
+pinocchio-system = { workspace = true }
+pinocchio-log = { workspace = true }
+solana-define-syscall = { workspace = true }
+hydra-api = { workspace = true }
+
+[package.metadata.solana]
+program-id = "Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea"
+
+[lints]
+workspace = true

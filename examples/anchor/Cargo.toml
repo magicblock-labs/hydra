@@ -1,0 +1,19 @@
+# Anchor workspace root for the Hydra integrator example.
+#
+# This is deliberately a separate Cargo workspace (excluded from the
+# top-level Hydra workspace) so that `anchor build` works out of the box:
+# Anchor expects its own workspace layout with `programs/*` members.
+
+[workspace]
+resolver = "2"
+members = ["programs/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

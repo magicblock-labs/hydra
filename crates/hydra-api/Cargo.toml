@@ -1,0 +1,38 @@
+[package]
+name = "hydra-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hydra — shared types, discriminators, errors, client builders"
+
+[features]
+default = []
+# Host-side instruction builders + decoders. Returns
+# `solana_instruction::Instruction`, usable by any client (RPC, Anchor
+# client-side) AND by any on-chain program that uses `solana-program`.
+client = ["dep:solana-instruction", "dep:solana-pubkey"]
+# On-chain CPI helpers for solana-program / Anchor callers. Wraps
+# `solana_cpi::invoke_signed` so integrators don't need to thread
+# AccountInfo lists manually.
+cpi-native = [
+    "client",
+    "dep:solana-account-info",
+    "dep:solana-cpi",
+    "dep:solana-program-error",
+]
+# On-chain CPI helpers for Pinocchio callers. Wraps
+# `pinocchio::cpi::invoke_signed` with `InstructionView`s built on the
+# stack (no allocations, usable from `no_std` programs).
+cpi-pinocchio = ["pinocchio/cpi"]
+
+[dependencies]
+pinocchio = { workspace = true }
+solana-address = { workspace = true }
+solana-instruction = { workspace = true, optional = true }
+solana-pubkey = { workspace = true, optional = true }
+solana-account-info = { version = "3", optional = true }
+solana-cpi = { version = "3", optional = true }
+solana-program-error = { version = "3", optional = true }
+
+[lints]
+workspace = true

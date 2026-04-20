@@ -1,0 +1,22 @@
+[package]
+name = "hydra-example-pinocchio"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Minimal Pinocchio integrator that creates a Hydra crank via CPI."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hydra-api = { workspace = true, features = ["cpi-pinocchio"] }
+pinocchio = { workspace = true }
+pinocchio-system = { workspace = true }
+
+[dev-dependencies]
+hydra-api = { workspace = true, features = ["client"] }
+mollusk-svm = { workspace = true }
+solana-account = { workspace = true }
+solana-instruction = { workspace = true }
+solana-pubkey = { workspace = true }

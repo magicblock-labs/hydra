@@ -1,0 +1,28 @@
+[package]
+name = "hydra-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[[bench]]
+name = "compute_units"
+harness = false
+
+[dependencies]
+hydra-api = { workspace = true, features = ["client"] }
+# Tests reference hydra purely as a pre-built .so — load it via mollusk.
+# No `hydra` dependency here because we don't link on-chain code into tests.
+mollusk-svm = { workspace = true }
+mollusk-svm-programs-memo = { workspace = true }
+solana-svm-log-collector = { workspace = true }
+solana-account = { workspace = true }
+solana-instruction = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-system-interface = { workspace = true }
+
+[dev-dependencies]
+solana-logger = { workspace = true }

@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+default-members = ["programs/hydra"]
+members = [
+    "programs/hydra",
+    "crates/hydra-api",
+    "crates/hydra-cranker",
+    "tests",
+    "tests/programs/noop",
+    "examples/native",
+    "examples/pinocchio",
+]
+# `examples/anchor` is its own Anchor workspace (Anchor.toml + programs/*)
+# so `anchor build` works when run from inside it. Excluded here so Cargo
+# doesn't try to merge the two workspaces.
+exclude = ["examples/anchor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/magicblock-labs/hydra"
+
+[workspace.dependencies]
+pinocchio = { version = "0.11", features = ["cpi"] }
+pinocchio-system = "0.6"
+pinocchio-log = "0.5"
+solana-address = { version = "2.6", features = ["decode", "curve25519"] }
+solana-define-syscall = "5.0"
+hydra-api = { path = "crates/hydra-api" }
+
+# tests only:
+mollusk-svm = "=0.12.1-agave-4.0"
+mollusk-svm-programs-memo = "=0.12.1-agave-4.0"
+solana-svm-log-collector = { version = "4.0.0-beta", features = ["agave-unstable-api"] }
+solana-logger = "3"
+solana-account = "3.0"
+solana-instruction = "3.0"
+solana-pubkey = "4.0"
+solana-system-interface = { version = "2.0", features = ["bincode"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+overflow-checks = true
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(feature, values("custom-alloc", "custom-panic", "no-entrypoint", "logging"))',
+] }
