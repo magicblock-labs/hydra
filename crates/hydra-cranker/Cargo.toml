@@ -14,7 +14,7 @@ path = "src/main.rs"
 hydra-api = { workspace = true, features = ["client"] }
 
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 crossbeam-channel = "0.5"
 ctrlc = "3"
 env_logger = "0.11"

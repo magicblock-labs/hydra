@@ -63,32 +63,40 @@ use hydra_api::instruction as ix;
 )]
 struct Cli {
     /// Solana JSON-RPC endpoint.
-    #[arg(long, default_value = "https://api.devnet.solana.com")]
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_RPC_URL",
+        default_value = "https://api.devnet.solana.com"
+    )]
     rpc_url: String,
     /// WebSocket endpoint. Derived from `--rpc-url` if omitted
     /// (`http`→`ws`, `https`→`wss`).
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_WS_URL")]
     ws_url: Option<String>,
     /// Cranker keypair. Pays tx fees and receives the per-trigger reward.
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_KEYPAIR")]
     keypair: PathBuf,
     /// If set, serve Prometheus metrics at `http://0.0.0.0:<port>/metrics`.
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_PROMETHEUS_PORT")]
     prometheus_port: Option<u16>,
     /// Optional Yellowstone gRPC endpoint (e.g. `https://grpc.example:10000`).
     /// When set, a gRPC subscription runs **in addition to** the WS subs and
     /// feeds the same cache + slot tick channel — extra redundancy and
     /// usually lower latency than `programSubscribe` / `slotSubscribe`.
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_GRPC_URL")]
     grpc_url: Option<String>,
     /// Optional `x-token` header for the gRPC endpoint.
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_GRPC_X_TOKEN")]
     grpc_x_token: Option<String>,
     /// Priority fee, in micro-lamports per compute unit, attached to every
     /// trigger tx via `ComputeBudget::SetComputeUnitPrice`. `0` (default)
     /// omits the ix entirely — no cost, no tx-size overhead. Typical values
     /// under contention: 1_000 – 100_000.
-    #[arg(long, default_value_t = 0)]
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_PRIORITY_FEE_MICRO_LAMPORTS",
+        default_value_t = 0
+    )]
     priority_fee_micro_lamports: u64,
 }
 
