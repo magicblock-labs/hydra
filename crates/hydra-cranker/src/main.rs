@@ -2,7 +2,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    io::Cursor,
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc,
@@ -14,7 +15,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
-use solana_keypair::read_keypair_file;
+use solana_keypair::{read_keypair, read_keypair_file, Keypair};
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
@@ -75,7 +76,7 @@ struct Cli {
     ws_url: Option<String>,
     /// Cranker keypair. Pays tx fees and receives the per-trigger reward.
     #[arg(long, env = "HYDRA_CRANKER_KEYPAIR")]
-    keypair: PathBuf,
+    keypair: String,
     /// If set, serve Prometheus metrics at `http://0.0.0.0:<port>/metrics`.
     #[arg(long, env = "HYDRA_CRANKER_PROMETHEUS_PORT")]
     prometheus_port: Option<u16>,
@@ -111,14 +112,32 @@ fn default_ws_url(rpc_url: &str) -> String {
     }
 }
 
+fn load_keypair(input: &str) -> Result<Keypair> {
+    if Path::new(input).exists() {
+        return read_keypair_file(input).map_err(|e| anyhow!("load keypair file {input}: {e}"));
+    }
+
+    let mut reader = Cursor::new(input);
+    if let Ok(keypair) = read_keypair(&mut reader) {
+        return Ok(keypair);
+    }
+
+    if let Ok(keypair) = Keypair::try_from_base58_string(input) {
+        return Ok(keypair);
+    }
+
+    Err(anyhow!(
+        "invalid keypair input: expected an existing file path, a JSON array with 64 bytes, or a base58-encoded keypair"
+    ))
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
     let args = Cli::parse();
-    let cranker = read_keypair_file(&args.keypair)
-        .map_err(|e| anyhow!("load keypair {}: {}", args.keypair.display(), e))?;
+    let cranker = load_keypair(&args.keypair)?;
     log::info!("cranker pubkey = {}", cranker.pubkey());
 
     // Bootstrap must use the same commitment as `programSubscribe` or a
