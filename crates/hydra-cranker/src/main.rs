@@ -2,7 +2,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    io::Cursor,
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc,
@@ -14,7 +15,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
-use solana_keypair::read_keypair_file;
+use solana_keypair::{read_keypair, read_keypair_file, Keypair};
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
@@ -63,32 +64,40 @@ use hydra_api::instruction as ix;
 )]
 struct Cli {
     /// Solana JSON-RPC endpoint.
-    #[arg(long, default_value = "https://api.devnet.solana.com")]
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_RPC_URL",
+        default_value = "https://api.devnet.solana.com"
+    )]
     rpc_url: String,
     /// WebSocket endpoint. Derived from `--rpc-url` if omitted
     /// (`http`→`ws`, `https`→`wss`).
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_WS_URL")]
     ws_url: Option<String>,
     /// Cranker keypair. Pays tx fees and receives the per-trigger reward.
-    #[arg(long)]
-    keypair: PathBuf,
+    #[arg(long, env = "HYDRA_CRANKER_KEYPAIR")]
+    keypair: String,
     /// If set, serve Prometheus metrics at `http://0.0.0.0:<port>/metrics`.
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_PROMETHEUS_PORT")]
     prometheus_port: Option<u16>,
     /// Optional Yellowstone gRPC endpoint (e.g. `https://grpc.example:10000`).
     /// When set, a gRPC subscription runs **in addition to** the WS subs and
     /// feeds the same cache + slot tick channel — extra redundancy and
     /// usually lower latency than `programSubscribe` / `slotSubscribe`.
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_GRPC_URL")]
     grpc_url: Option<String>,
     /// Optional `x-token` header for the gRPC endpoint.
-    #[arg(long)]
+    #[arg(long, env = "HYDRA_CRANKER_GRPC_X_TOKEN")]
     grpc_x_token: Option<String>,
     /// Priority fee, in micro-lamports per compute unit, attached to every
     /// trigger tx via `ComputeBudget::SetComputeUnitPrice`. `0` (default)
     /// omits the ix entirely — no cost, no tx-size overhead. Typical values
     /// under contention: 1_000 – 100_000.
-    #[arg(long, default_value_t = 0)]
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_PRIORITY_FEE_MICRO_LAMPORTS",
+        default_value_t = 0
+    )]
     priority_fee_micro_lamports: u64,
 }
 
@@ -103,14 +112,32 @@ fn default_ws_url(rpc_url: &str) -> String {
     }
 }
 
+fn load_keypair(input: &str) -> Result<Keypair> {
+    if Path::new(input).exists() {
+        return read_keypair_file(input).map_err(|e| anyhow!("load keypair file {input}: {e}"));
+    }
+
+    let mut reader = Cursor::new(input);
+    if let Ok(keypair) = read_keypair(&mut reader) {
+        return Ok(keypair);
+    }
+
+    if let Ok(keypair) = Keypair::try_from_base58_string(input) {
+        return Ok(keypair);
+    }
+
+    Err(anyhow!(
+        "invalid keypair input: expected an existing file path, a JSON array with 64 bytes, or a base58-encoded keypair"
+    ))
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
     let args = Cli::parse();
-    let cranker = read_keypair_file(&args.keypair)
-        .map_err(|e| anyhow!("load keypair {}: {}", args.keypair.display(), e))?;
+    let cranker = load_keypair(&args.keypair)?;
     log::info!("cranker pubkey = {}", cranker.pubkey());
 
     // Bootstrap must use the same commitment as `programSubscribe` or a
