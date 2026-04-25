@@ -51,7 +51,10 @@ pub struct Crank {
     /// default). Set immutably at `Create`, capped at
     /// [`crate::consts::MAX_COMPUTE_UNIT_LIMIT`].
     pub cu_limit: [u8; 4],
-    pub _pad: [u8; 1],
+    /// `1` iff `payer == authority` at `Create` (the payer is the signer).
+    /// `0` otherwise. Scheduled programs may require this when they treat
+    /// `authority` as proof of who registered the schedule.
+    pub authority_signer: u8,
 }
 
 impl Crank {
