@@ -718,6 +718,86 @@ fn cancel_rejects_unauthorized_signer() {
 }
 
 #[test]
+fn create_records_authority_signer_flag() {
+    // Provenance witness: header records whether `authority` was actually
+    // signed for at Create (i.e. `payer == authority`). Scheduled programs
+    // can require this flag to treat `authority` as a real witness.
+    let mollusk = mollusk_with_hydra();
+    let payer = Pubkey::new_unique();
+    let (crank_pda, _bump) = find_crank(&SEED);
+
+    let create_signed = create_ix(
+        payer,
+        crank_pda,
+        SEED,
+        payer.to_bytes(),
+        0,
+        100,
+        10,
+        0,
+        0,
+        memo::ID,
+        &[],
+        b"tick",
+    );
+    let (system_program, system_program_acct) = keyed_account_for_system_program();
+    let accounts = vec![
+        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+        (crank_pda, Account::default()),
+        (system_program, system_program_acct.clone()),
+    ];
+    let r = mollusk.process_transaction_instructions(&[create_signed], &accounts);
+    assert!(r.raw_result.is_ok());
+    let header = decode_header(
+        &r.resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .unwrap()
+            .1
+            .data,
+    );
+    assert_eq!(header.authority_signer, 1, "payer == authority -> flag = 1");
+
+    let payer2 = Pubkey::new_unique();
+    let other = Pubkey::new_unique();
+    const SEED2: [u8; 32] = [0x33; 32];
+    let (crank_pda2, _bump) = find_crank(&SEED2);
+    let create_unsigned = create_ix(
+        payer2,
+        crank_pda2,
+        SEED2,
+        other.to_bytes(),
+        0,
+        100,
+        10,
+        0,
+        0,
+        memo::ID,
+        &[],
+        b"tick",
+    );
+    let accounts2 = vec![
+        (payer2, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+        (crank_pda2, Account::default()),
+        (system_program, system_program_acct),
+    ];
+    let r2 = mollusk.process_transaction_instructions(&[create_unsigned], &accounts2);
+    assert!(r2.raw_result.is_ok());
+    let header2 = decode_header(
+        &r2.resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda2)
+            .unwrap()
+            .1
+            .data,
+    );
+    assert_eq!(
+        header2.authority_signer, 0,
+        "payer != authority -> flag = 0"
+    );
+}
+
+#[test]
 fn cancel_rejects_unkillable_crank() {
     let mollusk = mollusk_with_hydra();
     let payer = Pubkey::new_unique();

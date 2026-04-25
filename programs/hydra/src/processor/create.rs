@@ -69,6 +69,8 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         return Err(HydraError::InvalidSchedule.into());
     }
 
+    let authority_signer: u8 = (payer.address().as_array() == authority) as u8;
+
     let metas_offset = CREATE_FIXED_PREFIX_LEN;
     let metas_len = num_accounts * SERIALIZED_META_SIZE;
     let data_offset = metas_offset + metas_len;
@@ -144,6 +146,7 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     state.set_region_len(region_len as u16);
     state.bump = bump;
     state.set_cu_limit(cu_limit);
+    state.authority_signer = authority_signer;
 
     // Tail region bytes, matching the instructions-sysvar wire layout.
     let mut off = 0;
