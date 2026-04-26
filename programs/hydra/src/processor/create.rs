@@ -116,6 +116,9 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let signers = [Signer::from(&seeds_arr)];
 
     let funding_lamports = rent_min.saturating_sub(crank_ai.lamports());
+    if funding_lamports == 0 && !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     CreateAccountAllowPrefund {
         to: crank_ai,
         space: total_size as u64,
