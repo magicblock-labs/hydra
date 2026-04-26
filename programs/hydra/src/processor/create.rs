@@ -23,7 +23,7 @@ use pinocchio::{
     sysvars::{rent::Rent, Sysvar},
     AccountView, Address, ProgramResult,
 };
-use pinocchio_system::instructions::CreateAccount;
+use pinocchio_system::instructions::{CreateAccountAllowPrefund, Funding};
 
 use hydra_api::{
     consts::{
@@ -115,12 +115,18 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     ];
     let signers = [Signer::from(&seeds_arr)];
 
-    CreateAccount {
-        from: payer,
+    let funding_lamports = rent_min.saturating_sub(crank_ai.lamports());
+    if funding_lamports == 0 && !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    CreateAccountAllowPrefund {
         to: crank_ai,
-        lamports: rent_min,
         space: total_size as u64,
         owner: &hydra_api::ID,
+        funding: (funding_lamports > 0).then_some(Funding {
+            from: payer,
+            lamports: funding_lamports,
+        }),
     }
     .invoke_signed(&signers)?;
 
