@@ -99,6 +99,16 @@ struct Cli {
         default_value_t = 0
     )]
     priority_fee_micro_lamports: u64,
+    /// Send `Trigger` txs with `skip_preflight = true`. Off by default so
+    /// preflight catches reverts before the leader charges fees. Turn on to
+    /// surface failing inner ixs on-chain (otherwise they stall in simulation
+    /// and never produce a signature, hiding the failure mode).
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_TRIGGER_SKIP_PREFLIGHT",
+        default_value_t = false
+    )]
+    trigger_skip_preflight: bool,
 }
 
 fn default_ws_url(rpc_url: &str) -> String {
@@ -273,7 +283,13 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            match fire::fire_trigger(&rpc, &cranker, &entry, args.priority_fee_micro_lamports) {
+            match fire::fire_trigger(
+                &rpc,
+                &cranker,
+                &entry,
+                args.priority_fee_micro_lamports,
+                args.trigger_skip_preflight,
+            ) {
                 Ok(()) => {
                     log::info!("slot {}: triggered {}", slot, entry.pubkey);
                     metrics::metrics()
