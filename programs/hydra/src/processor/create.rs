@@ -139,6 +139,9 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     #[cfg(not(feature = "create-account-allow-prefund"))]
     {
         let funding_lamports = rent_min.saturating_sub(crank_ai.lamports());
+        if funding_lamports == 0 && !payer.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
         if funding_lamports > 0 {
             Transfer {
                 from: payer,
