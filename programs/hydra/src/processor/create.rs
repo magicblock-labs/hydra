@@ -23,6 +23,9 @@ use pinocchio::{
     sysvars::{rent::Rent, Sysvar},
     AccountView, Address, ProgramResult,
 };
+#[cfg(not(feature = "create-account-allow-prefund"))]
+use pinocchio_system::instructions::{Allocate, Assign, Transfer};
+#[cfg(feature = "create-account-allow-prefund")]
 use pinocchio_system::instructions::{CreateAccountAllowPrefund, Funding};
 
 use hydra_api::{
@@ -115,20 +118,49 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     ];
     let signers = [Signer::from(&seeds_arr)];
 
-    let funding_lamports = rent_min.saturating_sub(crank_ai.lamports());
-    if funding_lamports == 0 && !payer.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
+    #[cfg(feature = "create-account-allow-prefund")]
+    {
+        let funding_lamports = rent_min.saturating_sub(crank_ai.lamports());
+        if funding_lamports == 0 && !payer.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        CreateAccountAllowPrefund {
+            to: crank_ai,
+            space: total_size as u64,
+            owner: &hydra_api::ID,
+            funding: (funding_lamports > 0).then_some(Funding {
+                from: payer,
+                lamports: funding_lamports,
+            }),
+        }
+        .invoke_signed(&signers)?;
     }
-    CreateAccountAllowPrefund {
-        to: crank_ai,
-        space: total_size as u64,
-        owner: &hydra_api::ID,
-        funding: (funding_lamports > 0).then_some(Funding {
-            from: payer,
-            lamports: funding_lamports,
-        }),
+
+    #[cfg(not(feature = "create-account-allow-prefund"))]
+    {
+        let funding_lamports = rent_min.saturating_sub(crank_ai.lamports());
+        if funding_lamports == 0 && !payer.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        if funding_lamports > 0 {
+            Transfer {
+                from: payer,
+                to: crank_ai,
+                lamports: funding_lamports,
+            }
+            .invoke()?;
+        }
+        Allocate {
+            account: crank_ai,
+            space: total_size as u64,
+        }
+        .invoke_signed(&signers)?;
+        Assign {
+            account: crank_ai,
+            owner: &hydra_api::ID,
+        }
+        .invoke_signed(&signers)?;
     }
-    .invoke_signed(&signers)?;
 
     // Populate header + tail region verbatim in sysvar format.
     let mut account_data = crank_ai.try_borrow_mut()?;
