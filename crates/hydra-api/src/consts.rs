@@ -32,8 +32,8 @@ pub const MAX_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
 /// stuck and `Close` becomes permissionlessly callable. `next_exec_slot` only
 /// advances on successful `Trigger`, so a crank whose inner ix deterministically
 /// fails (or whose target is paused) would otherwise pin its rent forever.
-/// ~31 days at 400 ms/slot: 31 × 86_400 / 0.4 = 6_696_000.
-pub const STALENESS_THRESHOLD_SLOTS: u64 = 6_696_000;
+/// ~10 days at 400 ms/slot: 10 × 86_400 / 0.4 = 2_160_000.
+pub const STALENESS_THRESHOLD_SLOTS: u64 = 2_160_000;
 
 /// Per-meta size in both the on-chain template bytes and the instructions
 /// sysvar wire format: `[1 flag byte][32-byte pubkey]`.

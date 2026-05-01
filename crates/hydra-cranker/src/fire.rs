@@ -47,6 +47,7 @@ pub fn fire_trigger(
     cranker: &Keypair,
     entry: &CrankEntry,
     priority_fee_micro_lamports: u64,
+    skip_preflight: bool,
 ) -> Result<()> {
     let scheduled = ix::scheduled_ix_from_crank(&entry.data)
         .ok_or_else(|| anyhow!("malformed crank tail for {}", entry.pubkey))?;
@@ -71,11 +72,13 @@ pub fn fire_trigger(
     ixs.push(scheduled);
     let msg = Message::new_with_blockhash(&ixs, Some(&cranker.pubkey()), &blockhash);
     let tx = Transaction::new(&[cranker], msg, blockhash);
-    // Preflight on: reverts are caught before the leader charges fees.
+    // Preflight catches reverts before the leader charges fees, but also
+    // hides failures (no on-chain sig). Operators can opt into
+    // `skip_preflight = true` to land failing txs on-chain for debugging.
     rpc.send_transaction_with_config(
         &tx,
         RpcSendTransactionConfig {
-            skip_preflight: false,
+            skip_preflight,
             max_retries: Some(5),
             preflight_commitment: Some(CommitmentLevel::Processed),
             ..Default::default()
