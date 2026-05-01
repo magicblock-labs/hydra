@@ -20,6 +20,9 @@ no-entrypoint = []
 # Each checkpoint costs ~110 CU, so the visible Trigger CU ~doubles — only
 # enable when profiling.
 cu-trace = []
+# Uses the SIMD-0312 System Program instruction for prefunded crank PDAs.
+# Keep this disabled on mainnet until `create_account_allow_prefund` is active.
+create-account-allow-prefund = []
 
 [dependencies]
 pinocchio = { workspace = true }
