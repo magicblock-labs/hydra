@@ -129,6 +129,40 @@ let create = ix::create(
 );
 ```
 
+## Authenticating a Crank PDA
+
+Scheduled instructions run top-level, so a target program cannot rely on Hydra
+CPI signer privileges. If the scheduled ix needs to authenticate a Hydra crank,
+include the crank PDA and instructions sysvar in the scheduled ix and verify
+the sibling instructions in both directions.
+
+Hydra does the forward check: `Trigger` reads the instructions sysvar and
+requires `ix[k+1]` to byte-match the scheduled ix stored in the crank PDA. The
+scheduled program can do the reverse check: read the current instruction index,
+load `ix[k-1]`, and require it to be Hydra `Trigger` for the same crank PDA.
+
+```text
+ix[k-1] = Hydra.Trigger(crank = expected_crank_pda, ...)
+ix[k]   = your scheduled ix(crank = expected_crank_pda, instructions_sysvar, ...)
+```
+
+In the scheduled program, reject unless:
+
+- `expected_crank_pda == Pubkey::find_program_address([b"crank", seed], hydra_id)`
+- `crank.owner == hydra_id`
+- the previous ix program id is `hydra_id`
+- the previous ix discriminator is `Trigger`
+- the previous ix first account is the same crank PDA
+
+If the scheduled ix also needs to verify who created the schedule, read the
+crank header, for example with `hydra_api::state::load_crank`, and check both
+`authority` and `authority_signer`. `authority` is the value supplied at
+`Create`; `authority_signer == 1` means the `Create` payer/signer was that
+same authority. Require `authority == expected_authority` and
+`authority_signer == 1` when scheduler identity matters. If
+`authority_signer == 0`, the authority is only stored for cancellation and is
+not proof that the authority signed the schedule creation.
+
 ## Costs
 
 A crank has two upfront costs and a small per-trigger fee:
