@@ -17,15 +17,10 @@ use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::{pubkey, Pubkey};
 use solana_svm_log_collector::LogCollector;
 
+use hydra_api::instruction::{SchedMeta, ScheduledIx};
 use hydra_api::{
     consts::{ix, CRANK_HEADER_SIZE, META_FLAG_WRITABLE},
     state::Crank,
-};
-#[cfg(test)]
-use hydra_api::{
-    consts::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
-    instruction::{CreateArgs, SchedMeta},
-    state::region_len_for,
 };
 
 /// Absolute path to the built `.so` (without extension) — mollusk appends `.so`.
@@ -66,7 +61,9 @@ pub fn find_crank(seed: &[u8; 32]) -> (Pubkey, u8) {
     (Pubkey::new_from_array(addr.to_bytes()), bump)
 }
 
-/// Build a `Create` instruction.
+/// Build a single-instruction `Create` (the common case). Thin wrapper over
+/// [`create_ix_multi`] so existing single-ix tests exercise the same wire path.
+#[allow(clippy::too_many_arguments)]
 pub fn create_ix(
     payer: Pubkey,
     crank: Pubkey,
@@ -78,8 +75,44 @@ pub fn create_ix(
     priority_tip: u64,
     cu_limit: u32,
     sched_program: Pubkey,
-    sched_metas: &[(Pubkey, bool)], // (pubkey, is_writable)
+    sched_metas: &[SchedMeta],
     sched_data: &[u8],
+) -> Instruction {
+    create_ix_multi(
+        payer,
+        crank,
+        seed,
+        authority,
+        start_slot,
+        interval_slots,
+        remaining,
+        priority_tip,
+        cu_limit,
+        &[ScheduledIx {
+            program_id: sched_program,
+            metas: sched_metas,
+            data: sched_data,
+        }],
+    )
+}
+
+/// Build a `Create` instruction scheduling one or more sibling instructions.
+///
+/// Wire layout: scheduling prefix, then a sequence of self-delimiting ix blobs
+/// `[num_accounts: u8][data_len: u16][program_id: 32][metas][data]`, parsed
+/// until the data is exhausted (no instruction count on the wire).
+#[allow(clippy::too_many_arguments)]
+pub fn create_ix_multi(
+    payer: Pubkey,
+    crank: Pubkey,
+    seed: [u8; 32],
+    authority: [u8; 32],
+    start_slot: u64,
+    interval_slots: u64,
+    remaining: u64,
+    priority_tip: u64,
+    cu_limit: u32,
+    sched: &[ScheduledIx],
 ) -> Instruction {
     let (system_program, _) = keyed_account_for_system_program();
 
@@ -91,15 +124,21 @@ pub fn create_ix(
     data.extend_from_slice(&remaining.to_le_bytes());
     data.extend_from_slice(&priority_tip.to_le_bytes());
     data.extend_from_slice(&cu_limit.to_le_bytes());
-    data.push(sched_metas.len() as u8);
-    data.extend_from_slice(&(sched_data.len() as u16).to_le_bytes());
-    data.extend_from_slice(&sched_program.to_bytes());
-    for (pk, w) in sched_metas {
-        let flag: u8 = if *w { META_FLAG_WRITABLE } else { 0 };
-        data.push(flag);
-        data.extend_from_slice(&pk.to_bytes());
+    for s in sched {
+        data.push(s.metas.len() as u8);
+        data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
+        data.extend_from_slice(&s.program_id.to_bytes());
+        for meta in s.metas {
+            let flag: u8 = if meta.is_writable {
+                META_FLAG_WRITABLE
+            } else {
+                0
+            };
+            data.push(flag);
+            data.extend_from_slice(&meta.pubkey.to_bytes());
+        }
+        data.extend_from_slice(s.data);
     }
-    data.extend_from_slice(sched_data);
 
     Instruction {
         program_id: hydra_id(),
@@ -270,6 +309,68 @@ pub fn print_cu_table() {
     let cu_trig_fail_tx = r_trig_fail.compute_units_consumed;
     let cu_trig_fail = take_hydra_cu(&logger).expect("hydra log: trigger reject");
 
+    // Trigger (happy, 3 noop siblings) — shows the per-extra-ix Hydra cost,
+    // which is just the larger single memcmp over the concatenated region.
+    const MULTI_N: usize = 3;
+    const SEED_MULTI: [u8; 32] = [0x44; 32];
+    let (crank_m, _) = find_crank(&SEED_MULTI);
+    let payer_m = Pubkey::new_unique();
+    let multi_specs: Vec<ScheduledIx> = (0..MULTI_N)
+        .map(|_| ScheduledIx {
+            program_id: NOOP_ID,
+            metas: &[],
+            data: tick,
+        })
+        .collect();
+    let create_m = create_ix_multi(
+        payer_m,
+        crank_m,
+        SEED_MULTI,
+        authority.to_bytes(),
+        0,
+        400,
+        10,
+        1_000,
+        0,
+        &multi_specs,
+    );
+    let initial_m = vec![
+        (payer_m, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+        (crank_m, Account::default()),
+        (cranker, Account::new(0, 0, &system_program)),
+        (system_program, sys_acct.clone()),
+    ];
+    let r_create_m = mollusk.process_transaction_instructions(&[create_m], &initial_m);
+    assert!(
+        r_create_m.raw_result.is_ok(),
+        "create multi: {:?}",
+        r_create_m.raw_result
+    );
+    let _ = take_hydra_cu(&logger);
+    let mut funded_m = r_create_m.resulting_accounts.clone();
+    for (k, a) in funded_m.iter_mut() {
+        if *k == crank_m {
+            a.lamports += 1_000_000;
+        }
+    }
+    let trigger_m = trigger_ix(crank_m, cranker);
+    let mut multi_tx = vec![trigger_m];
+    for _ in 0..MULTI_N {
+        multi_tx.push(Instruction {
+            program_id: NOOP_ID,
+            accounts: vec![],
+            data: tick.to_vec(),
+        });
+    }
+    let r_trig_multi = mollusk.process_transaction_instructions(&multi_tx, &funded_m);
+    assert!(
+        r_trig_multi.raw_result.is_ok(),
+        "trigger multi: {:?}",
+        r_trig_multi.raw_result
+    );
+    let cu_trig_multi_tx = r_trig_multi.compute_units_consumed;
+    let cu_trig_multi = take_hydra_cu(&logger).expect("hydra log: trigger multi");
+
     // Cancel
     let cancel = cancel_ix(authority, crank, authority);
     let r_cancel = mollusk.process_transaction_instructions(&[cancel], &funded);
@@ -345,6 +446,10 @@ pub fn print_cu_table() {
         cu_trig_fail, cu_trig_fail_tx
     );
     println!(
+        "  │ Trigger (happy, {} noop siblings)     │ {:>10} │ {:>8} │",
+        MULTI_N, cu_trig_multi, cu_trig_multi_tx
+    );
+    println!(
         "  │ Cancel                               │ {:>10} │ {:>8} │",
         cu_cancel, cu_cancel_tx
     );
@@ -371,912 +476,1569 @@ pub fn print_cu_table() {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Human-readable per-instruction CU table. Run with:
-/// `cargo test -p hydra-tests cu_table -- --ignored --nocapture`
-/// (equivalent output to `cargo bench -p hydra-tests`).
-#[test]
-#[ignore]
-fn cu_table() {
-    print_cu_table();
-}
-
-#[test]
-fn public_create_builder_serializes_cu_limit_and_executes() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let scheduled_meta = Pubkey::new_unique();
-    let scheduled_data: &[u8] = b"tick";
-    let cu_limit: u32 = 321_000;
-
-    let ix = hydra_api::instruction::create(
-        payer,
-        crank_pda,
-        &CreateArgs {
-            seed: SEED,
-            authority: [0u8; 32],
-            start_slot: 7,
-            interval_slots: 100,
-            remaining: 10,
-            priority_tip: 1_000,
-            cu_limit,
-            scheduled_program_id: memo::ID,
-            scheduled_metas: &[SchedMeta::writable(scheduled_meta)],
-            scheduled_data,
-        },
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (system_program, system_program_acct),
-    ];
-
-    let result = mollusk.process_transaction_instructions(&[ix], &accounts);
-    assert!(
-        result.raw_result.is_ok(),
-        "create via public builder failed: {:?}",
-        result.raw_result
-    );
-
-    let crank_acct = result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &crank_pda)
-        .map(|(_, a)| a)
-        .expect("crank account");
-
-    let header = decode_header(&crank_acct.data);
-    assert_eq!(header.next_exec_slot(), 7);
-    assert_eq!(header.interval_slots(), 100);
-    assert_eq!(header.priority_tip(), 1_000);
-    assert_eq!(header.cu_limit(), cu_limit);
-    assert_eq!(
-        header.region_len() as usize,
-        region_len_for(1, scheduled_data.len())
-    );
-}
-
-#[test]
-fn create_happy_path_writes_header_and_region() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let recipient = Pubkey::new_unique();
-    let memo_data: &[u8] = b"tick";
-
-    let ix = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32], // no cancel authority
-        0,         // start_slot: immediately executable
-        100,       // interval_slots
-        10,        // remaining (not infinite)
-        1_000,     // priority_tip
-        0,         // cu_limit (0 = omit the ix)
-        memo::ID,
-        &[(recipient, false)], // one read-only account just for content
-        memo_data,
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (system_program, system_program_acct),
-    ];
-
-    let result = mollusk.process_transaction_instructions(&[ix], &accounts);
-    assert!(
-        result.raw_result.is_ok(),
-        "create failed: {:?}",
-        result.raw_result
-    );
-
-    // Find the crank account in the result.
-    let crank_acct = result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &crank_pda)
-        .map(|(_, a)| a)
-        .expect("crank account");
-
-    assert_eq!(crank_acct.owner, hydra_id(), "owner mismatch");
-    let region_len = region_len_for(1, memo_data.len());
-    assert_eq!(
-        crank_acct.data.len(),
-        CRANK_HEADER_SIZE + region_len,
-        "total account size"
-    );
-
-    let header = decode_header(&crank_acct.data);
-    assert_eq!(header.seed, SEED);
-    assert_eq!(header.authority, [0u8; 32]);
-    assert_eq!(header.next_exec_slot(), 0);
-    assert_eq!(header.interval_slots(), 100);
-    assert_eq!(header.remaining(), 10);
-    assert_eq!(header.priority_tip(), 1_000);
-    assert_eq!(header.executed(), 0);
-    assert_eq!(header.region_len() as usize, region_len);
-    assert!(header.rent_min() > 0, "rent_min should be cached");
-}
-
-#[test]
-fn trigger_happy_path_pays_reward_and_advances() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let cranker = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let recipient = Pubkey::new_unique();
-    let memo_data: &[u8] = b"tick";
-    let priority_tip: u64 = 2_500;
-
-    // 1. Create the crank. SPL memo with no metas = log-only, no signers.
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        0,
-        100,
-        10,
-        priority_tip,
-        0, // cu_limit
-        memo::ID,
-        &[], // scheduled memo takes zero accounts
-        memo_data,
-    );
-
-    // 2. Trigger + sibling memo ix (must be ix[k+1] in the tx).
-    let trigger = trigger_ix(crank_pda, cranker);
-    let scheduled = Instruction {
-        program_id: memo::ID,
-        accounts: vec![],
-        data: memo_data.to_vec(),
+#[cfg(test)]
+mod tests {
+    use hydra_api::{
+        instruction::CreateArgs, state::region_len_for, CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS,
     };
 
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let (memo_id, memo_acct) = memo::keyed_account();
+    use super::*;
 
-    let cranker_starting: u64 = 0;
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (cranker, Account::new(cranker_starting, 0, &system_program)),
-        (recipient, Account::new(1_000_000, 0, &system_program)),
-        (memo_id, memo_acct),
-        (system_program, system_program_acct),
-    ];
-
-    // Run create first (separate tx — can't sign the trigger in the same tx
-    // since create needs payer-signed and trigger needs cranker-signed, and
-    // the cranker didn't fund the PDA).
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(
-        after_create.raw_result.is_ok(),
-        "create failed: {:?}",
-        after_create.raw_result
-    );
-
-    // Top up the crank PDA so it can afford reward + tip above rent_min.
-    // In production a user would do this via a direct system transfer to the
-    // crank PDA; here we just mutate the in-memory account.
-    let mut funded = after_create.resulting_accounts.clone();
-    for (k, a) in funded.iter_mut() {
-        if *k == crank_pda {
-            a.lamports += 1_000_000; // 0.001 SOL headroom
-        }
+    /// Human-readable per-instruction CU table. Run with:
+    /// `cargo test -p hydra-tests cu_table -- --ignored --nocapture`
+    /// (equivalent output to `cargo bench -p hydra-tests`).
+    #[test]
+    #[ignore]
+    fn cu_table() {
+        print_cu_table();
     }
 
-    // Now run [trigger, scheduled] as a single tx so the instructions sysvar
-    // contains both and verify_followup sees the sibling at index 1.
-    let after_trigger = mollusk.process_transaction_instructions(&[trigger, scheduled], &funded);
-    assert!(
-        after_trigger.raw_result.is_ok(),
-        "trigger failed: {:?}; cu={}",
-        after_trigger.raw_result,
-        after_trigger.compute_units_consumed
-    );
+    #[test]
+    fn public_create_builder_serializes_cu_limit_and_executes() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let scheduled_meta = Pubkey::new_unique();
+        let scheduled_data: &[u8] = b"tick";
+        let cu_limit: u32 = 321_000;
 
-    let total_cu = after_trigger.compute_units_consumed;
-    eprintln!("trigger + memo CU: {}", total_cu);
+        let ix = hydra_api::instruction::create(
+            payer,
+            crank_pda,
+            &CreateArgs {
+                seed: SEED,
+                authority: [0u8; 32],
+                start_slot: 7,
+                interval_slots: 100,
+                remaining: 10,
+                priority_tip: 1_000,
+                cu_limit,
+                scheduled: &[ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::writable(scheduled_meta)],
+                    data: scheduled_data,
+                }],
+            },
+        );
 
-    let crank_acct = after_trigger
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &crank_pda)
-        .map(|(_, a)| a)
-        .expect("crank after trigger");
-    let cranker_acct = after_trigger
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &cranker)
-        .map(|(_, a)| a)
-        .expect("cranker after trigger");
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
 
-    assert_eq!(
-        cranker_acct.lamports,
-        cranker_starting + CRANKER_REWARD + priority_tip,
-        "cranker reward"
-    );
+        let result = mollusk.process_transaction_instructions(&[ix], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "create via public builder failed: {:?}",
+            result.raw_result
+        );
 
-    let header = decode_header(&crank_acct.data);
-    assert_eq!(header.executed(), 1, "executed++");
-    assert_eq!(header.remaining(), 9, "remaining--");
-    assert_eq!(header.next_exec_slot(), 100, "slot advanced by interval");
-}
-
-#[test]
-fn cancel_with_matching_authority_refunds_recipient() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let authority = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let recipient = Pubkey::new_unique();
-
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        authority.to_bytes(),
-        0,
-        100,
-        10,
-        0,
-        0, // cu_limit
-        memo::ID,
-        &[],
-        b"tick",
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (authority, Account::new(0, 0, &system_program)),
-        (recipient, Account::new(0, 0, &system_program)),
-        (system_program, system_program_acct),
-    ];
-
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
-
-    let cancel = cancel_ix(authority, crank_pda, recipient);
-    let after_cancel =
-        mollusk.process_transaction_instructions(&[cancel], &after_create.resulting_accounts);
-    assert!(
-        after_cancel.raw_result.is_ok(),
-        "cancel failed: {:?}",
-        after_cancel.raw_result
-    );
-
-    let recipient_acct = after_cancel
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &recipient)
-        .map(|(_, a)| a)
-        .expect("recipient");
-    assert!(
-        recipient_acct.lamports > 0,
-        "recipient should receive crank rent"
-    );
-    let crank_acct = after_cancel
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &crank_pda)
-        .map(|(_, a)| a)
-        .expect("crank post-cancel");
-    assert_eq!(crank_acct.lamports, 0, "crank drained");
-}
-
-#[test]
-fn cancel_rejects_unauthorized_signer() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let authority = Pubkey::new_unique();
-    let imposter = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let recipient = Pubkey::new_unique();
-
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        authority.to_bytes(),
-        0,
-        100,
-        10,
-        0,
-        0, // cu_limit
-        memo::ID,
-        &[],
-        b"tick",
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (authority, Account::new(0, 0, &system_program)),
-        (imposter, Account::new(0, 0, &system_program)),
-        (recipient, Account::new(0, 0, &system_program)),
-        (system_program, system_program_acct),
-    ];
-
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
-
-    let cancel = cancel_ix(imposter, crank_pda, recipient);
-    let after_cancel =
-        mollusk.process_transaction_instructions(&[cancel], &after_create.resulting_accounts);
-    assert!(
-        after_cancel.raw_result.is_err(),
-        "imposter should be rejected"
-    );
-}
-
-#[test]
-fn create_records_authority_signer_flag() {
-    // Provenance witness: header records whether `authority` was actually
-    // signed for at Create (i.e. `payer == authority`). Scheduled programs
-    // can require this flag to treat `authority` as a real witness.
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-
-    let create_signed = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        payer.to_bytes(),
-        0,
-        100,
-        10,
-        0,
-        0,
-        memo::ID,
-        &[],
-        b"tick",
-    );
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (system_program, system_program_acct.clone()),
-    ];
-    let r = mollusk.process_transaction_instructions(&[create_signed], &accounts);
-    assert!(r.raw_result.is_ok());
-    let header = decode_header(
-        &r.resulting_accounts
+        let crank_acct = result
+            .resulting_accounts
             .iter()
             .find(|(k, _)| k == &crank_pda)
-            .unwrap()
-            .1
-            .data,
-    );
-    assert_eq!(header.authority_signer, 1, "payer == authority -> flag = 1");
+            .map(|(_, a)| a)
+            .expect("crank account");
 
-    let payer2 = Pubkey::new_unique();
-    let other = Pubkey::new_unique();
-    const SEED2: [u8; 32] = [0x33; 32];
-    let (crank_pda2, _bump) = find_crank(&SEED2);
-    let create_unsigned = create_ix(
-        payer2,
-        crank_pda2,
-        SEED2,
-        other.to_bytes(),
-        0,
-        100,
-        10,
-        0,
-        0,
-        memo::ID,
-        &[],
-        b"tick",
-    );
-    let accounts2 = vec![
-        (payer2, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda2, Account::default()),
-        (system_program, system_program_acct),
-    ];
-    let r2 = mollusk.process_transaction_instructions(&[create_unsigned], &accounts2);
-    assert!(r2.raw_result.is_ok());
-    let header2 = decode_header(
-        &r2.resulting_accounts
+        let header = decode_header(&crank_acct.data);
+        assert_eq!(header.next_exec_slot(), 7);
+        assert_eq!(header.interval_slots(), 100);
+        assert_eq!(header.priority_tip(), 1_000);
+        assert_eq!(header.cu_limit(), cu_limit);
+        assert_eq!(
+            header.region_len() as usize,
+            region_len_for(1, scheduled_data.len())
+        );
+    }
+
+    #[test]
+    fn create_happy_path_writes_header_and_region() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let recipient = Pubkey::new_unique();
+        let memo_data: &[u8] = b"tick";
+
+        let ix = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32], // no cancel authority
+            0,         // start_slot: immediately executable
+            100,       // interval_slots
+            10,        // remaining (not infinite)
+            1_000,     // priority_tip
+            0,         // cu_limit (0 = omit the ix)
+            memo::ID,
+            &[SchedMeta::readonly(recipient)], // one read-only account just for content
+            memo_data,
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+
+        let result = mollusk.process_transaction_instructions(&[ix], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "create failed: {:?}",
+            result.raw_result
+        );
+
+        // Find the crank account in the result.
+        let crank_acct = result
+            .resulting_accounts
             .iter()
-            .find(|(k, _)| k == &crank_pda2)
-            .unwrap()
-            .1
-            .data,
-    );
-    assert_eq!(
-        header2.authority_signer, 0,
-        "payer != authority -> flag = 0"
-    );
-}
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank account");
 
-#[test]
-fn cancel_rejects_unkillable_crank() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let anyone = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let recipient = Pubkey::new_unique();
+        assert_eq!(crank_acct.owner, hydra_id(), "owner mismatch");
+        let region_len = region_len_for(1, memo_data.len());
+        assert_eq!(
+            crank_acct.data.len(),
+            CRANK_HEADER_SIZE + region_len,
+            "total account size"
+        );
 
-    // authority == [0; 32] makes the crank unkillable via Cancel.
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        0,
-        100,
-        10,
-        0,
-        0, // cu_limit
-        memo::ID,
-        &[],
-        b"tick",
-    );
+        let header = decode_header(&crank_acct.data);
+        assert_eq!(header.seed, SEED);
+        assert_eq!(header.authority, [0u8; 32]);
+        assert_eq!(header.next_exec_slot(), 0);
+        assert_eq!(header.interval_slots(), 100);
+        assert_eq!(header.remaining(), 10);
+        assert_eq!(header.priority_tip(), 1_000);
+        assert_eq!(header.executed(), 0);
+        assert_eq!(header.region_len() as usize, region_len);
+        assert!(header.rent_min() > 0, "rent_min should be cached");
+    }
 
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (anyone, Account::new(0, 0, &system_program)),
-        (recipient, Account::new(0, 0, &system_program)),
-        (system_program, system_program_acct),
-    ];
+    #[test]
+    fn trigger_happy_path_pays_reward_and_advances() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let recipient = Pubkey::new_unique();
+        let memo_data: &[u8] = b"tick";
+        let priority_tip: u64 = 2_500;
 
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
+        // 1. Create the crank. SPL memo with no metas = log-only, no signers.
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            priority_tip,
+            0, // cu_limit
+            memo::ID,
+            &[], // scheduled memo takes zero accounts
+            memo_data,
+        );
 
-    let cancel = cancel_ix(anyone, crank_pda, recipient);
-    let after_cancel =
-        mollusk.process_transaction_instructions(&[cancel], &after_create.resulting_accounts);
-    assert!(
-        after_cancel.raw_result.is_err(),
-        "unkillable crank should refuse Cancel"
-    );
-}
+        // 2. Trigger + sibling memo ix (must be ix[k+1] in the tx).
+        let trigger = trigger_ix(crank_pda, cranker);
+        let scheduled = Instruction {
+            program_id: memo::ID,
+            accounts: vec![],
+            data: memo_data.to_vec(),
+        };
 
-#[test]
-fn close_permissionless_when_underfunded() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let reporter = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
 
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32], // no authority -> reporter is free to name themselves recipient
-        0,
-        100,
-        10,
-        0,
-        0, // cu_limit
-        memo::ID,
-        &[],
-        b"tick",
-    );
+        let cranker_starting: u64 = 0;
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(cranker_starting, 0, &system_program)),
+            (recipient, Account::new(1_000_000, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
 
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (reporter, Account::new(0, 0, &system_program)),
-        (system_program, system_program_acct),
-    ];
+        // Run create first (separate tx — can't sign the trigger in the same tx
+        // since create needs payer-signed and trigger needs cranker-signed, and
+        // the cranker didn't fund the PDA).
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            after_create.raw_result.is_ok(),
+            "create failed: {:?}",
+            after_create.raw_result
+        );
 
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
+        // Top up the crank PDA so it can afford reward + tip above rent_min.
+        // In production a user would do this via a direct system transfer to the
+        // crank PDA; here we just mutate the in-memory account.
+        let mut funded = after_create.resulting_accounts.clone();
+        for (k, a) in funded.iter_mut() {
+            if *k == crank_pda {
+                a.lamports += 1_000_000; // 0.001 SOL headroom
+            }
+        }
 
-    // Crank is freshly created with exactly rent_min lamports -> 0 headroom -> underfunded.
-    let close = close_ix(reporter, crank_pda, reporter);
-    let after =
-        mollusk.process_transaction_instructions(&[close], &after_create.resulting_accounts);
-    assert!(
-        after.raw_result.is_ok(),
-        "close failed: {:?}",
-        after.raw_result
-    );
+        // Now run [trigger, scheduled] as a single tx so the instructions sysvar
+        // contains both and verify_followup sees the sibling at index 1.
+        let after_trigger =
+            mollusk.process_transaction_instructions(&[trigger, scheduled], &funded);
+        assert!(
+            after_trigger.raw_result.is_ok(),
+            "trigger failed: {:?}; cu={}",
+            after_trigger.raw_result,
+            after_trigger.compute_units_consumed
+        );
 
-    let reporter_acct = after
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &reporter)
-        .map(|(_, a)| a)
-        .expect("reporter");
-    assert!(reporter_acct.lamports > 0, "reporter claims bounty");
-}
+        let total_cu = after_trigger.compute_units_consumed;
+        eprintln!("trigger + memo CU: {}", total_cu);
 
-#[test]
-fn close_refuses_healthy_crank() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let reporter = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
+        let crank_acct = after_trigger
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank after trigger");
+        let cranker_acct = after_trigger
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &cranker)
+            .map(|(_, a)| a)
+            .expect("cranker after trigger");
 
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        0,
-        100,
-        10,
-        0,
-        0, // cu_limit
-        memo::ID,
-        &[],
-        b"tick",
-    );
+        assert_eq!(
+            cranker_acct.lamports,
+            cranker_starting + CRANKER_REWARD + priority_tip,
+            "cranker reward"
+        );
 
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (reporter, Account::new(0, 0, &system_program)),
-        (system_program, system_program_acct),
-    ];
+        let header = decode_header(&crank_acct.data);
+        assert_eq!(header.executed(), 1, "executed++");
+        assert_eq!(header.remaining(), 9, "remaining--");
+        assert_eq!(header.next_exec_slot(), 100, "slot advanced by interval");
+    }
 
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
+    #[test]
+    fn cancel_with_matching_authority_refunds_recipient() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let recipient = Pubkey::new_unique();
 
-    // Fund the crank generously so it's NOT underfunded.
-    let mut funded = after_create.resulting_accounts.clone();
-    for (k, a) in funded.iter_mut() {
-        if *k == crank_pda {
-            a.lamports += 10_000_000;
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            authority.to_bytes(),
+            0,
+            100,
+            10,
+            0,
+            0, // cu_limit
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (authority, Account::new(0, 0, &system_program)),
+            (recipient, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let cancel = cancel_ix(authority, crank_pda, recipient);
+        let after_cancel =
+            mollusk.process_transaction_instructions(&[cancel], &after_create.resulting_accounts);
+        assert!(
+            after_cancel.raw_result.is_ok(),
+            "cancel failed: {:?}",
+            after_cancel.raw_result
+        );
+
+        let recipient_acct = after_cancel
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &recipient)
+            .map(|(_, a)| a)
+            .expect("recipient");
+        assert!(
+            recipient_acct.lamports > 0,
+            "recipient should receive crank rent"
+        );
+        let crank_acct = after_cancel
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank post-cancel");
+        assert_eq!(crank_acct.lamports, 0, "crank drained");
+    }
+
+    #[test]
+    fn cancel_rejects_unauthorized_signer() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let imposter = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let recipient = Pubkey::new_unique();
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            authority.to_bytes(),
+            0,
+            100,
+            10,
+            0,
+            0, // cu_limit
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (authority, Account::new(0, 0, &system_program)),
+            (imposter, Account::new(0, 0, &system_program)),
+            (recipient, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let cancel = cancel_ix(imposter, crank_pda, recipient);
+        let after_cancel =
+            mollusk.process_transaction_instructions(&[cancel], &after_create.resulting_accounts);
+        assert!(
+            after_cancel.raw_result.is_err(),
+            "imposter should be rejected"
+        );
+    }
+
+    #[test]
+    fn create_records_authority_signer_flag() {
+        // Provenance witness: header records whether `authority` was actually
+        // signed for at Create (i.e. `payer == authority`). Scheduled programs
+        // can require this flag to treat `authority` as a real witness.
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create_signed = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            payer.to_bytes(),
+            0,
+            100,
+            10,
+            0,
+            0,
+            memo::ID,
+            &[],
+            b"tick",
+        );
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct.clone()),
+        ];
+        let r = mollusk.process_transaction_instructions(&[create_signed], &accounts);
+        assert!(r.raw_result.is_ok());
+        let header = decode_header(
+            &r.resulting_accounts
+                .iter()
+                .find(|(k, _)| k == &crank_pda)
+                .unwrap()
+                .1
+                .data,
+        );
+        assert_eq!(header.authority_signer, 1, "payer == authority -> flag = 1");
+
+        let payer2 = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+        const SEED2: [u8; 32] = [0x33; 32];
+        let (crank_pda2, _bump) = find_crank(&SEED2);
+        let create_unsigned = create_ix(
+            payer2,
+            crank_pda2,
+            SEED2,
+            other.to_bytes(),
+            0,
+            100,
+            10,
+            0,
+            0,
+            memo::ID,
+            &[],
+            b"tick",
+        );
+        let accounts2 = vec![
+            (payer2, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda2, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let r2 = mollusk.process_transaction_instructions(&[create_unsigned], &accounts2);
+        assert!(r2.raw_result.is_ok());
+        let header2 = decode_header(
+            &r2.resulting_accounts
+                .iter()
+                .find(|(k, _)| k == &crank_pda2)
+                .unwrap()
+                .1
+                .data,
+        );
+        assert_eq!(
+            header2.authority_signer, 0,
+            "payer != authority -> flag = 0"
+        );
+    }
+
+    #[test]
+    fn cancel_rejects_unkillable_crank() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let anyone = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let recipient = Pubkey::new_unique();
+
+        // authority == [0; 32] makes the crank unkillable via Cancel.
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0, // cu_limit
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (anyone, Account::new(0, 0, &system_program)),
+            (recipient, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let cancel = cancel_ix(anyone, crank_pda, recipient);
+        let after_cancel =
+            mollusk.process_transaction_instructions(&[cancel], &after_create.resulting_accounts);
+        assert!(
+            after_cancel.raw_result.is_err(),
+            "unkillable crank should refuse Cancel"
+        );
+    }
+
+    #[test]
+    fn close_permissionless_when_underfunded() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let reporter = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32], // no authority -> reporter is free to name themselves recipient
+            0,
+            100,
+            10,
+            0,
+            0, // cu_limit
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (reporter, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        // Crank is freshly created with exactly rent_min lamports -> 0 headroom -> underfunded.
+        let close = close_ix(reporter, crank_pda, reporter);
+        let after =
+            mollusk.process_transaction_instructions(&[close], &after_create.resulting_accounts);
+        assert!(
+            after.raw_result.is_ok(),
+            "close failed: {:?}",
+            after.raw_result
+        );
+
+        let reporter_acct = after
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &reporter)
+            .map(|(_, a)| a)
+            .expect("reporter");
+        assert!(reporter_acct.lamports > 0, "reporter claims bounty");
+    }
+
+    #[test]
+    fn close_refuses_healthy_crank() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let reporter = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0, // cu_limit
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (reporter, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        // Fund the crank generously so it's NOT underfunded.
+        let mut funded = after_create.resulting_accounts.clone();
+        for (k, a) in funded.iter_mut() {
+            if *k == crank_pda {
+                a.lamports += 10_000_000;
+            }
+        }
+
+        let close = close_ix(reporter, crank_pda, reporter);
+        let after = mollusk.process_transaction_instructions(&[close], &funded);
+        assert!(after.raw_result.is_err(), "healthy crank must refuse Close");
+    }
+
+    #[test]
+    fn close_permissionless_when_stuck() {
+        let mut mollusk = mollusk_with_hydra();
+        mollusk.sysvars.clock.slot = STALENESS_THRESHOLD_SLOTS + 1;
+
+        let payer = Pubkey::new_unique();
+        let reporter = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0, // cu_limit
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (reporter, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let mut funded = after_create.resulting_accounts.clone();
+        for (k, a) in funded.iter_mut() {
+            if *k == crank_pda {
+                a.lamports += 10_000_000;
+            }
+        }
+
+        let close = close_ix(reporter, crank_pda, reporter);
+        let after = mollusk.process_transaction_instructions(&[close], &funded);
+        assert!(
+            after.raw_result.is_ok(),
+            "stuck crank should permit Close: {:?}",
+            after.raw_result
+        );
+    }
+
+    #[test]
+    fn create_rejects_signer_flag_in_metas() {
+        // Manually build data with META_FLAG_SIGNER set on a meta, bypassing
+        // the `create_ix` helper which only accepts (pubkey, is_writable).
+        use hydra_api::consts::META_FLAG_SIGNER;
+
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let fake = Pubkey::new_unique();
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let mut data = vec![ix::CREATE];
+        data.extend_from_slice(&SEED);
+        data.extend_from_slice(&[0u8; 32]); // authority
+        data.extend_from_slice(&0u64.to_le_bytes()); // start_slot
+        data.extend_from_slice(&100u64.to_le_bytes()); // interval_slots
+        data.extend_from_slice(&10u64.to_le_bytes()); // remaining
+        data.extend_from_slice(&0u64.to_le_bytes()); // tip
+        data.extend_from_slice(&0u32.to_le_bytes()); // cu_limit
+        data.push(1u8); // num_accounts
+        data.extend_from_slice(&1u16.to_le_bytes()); // data_len
+        data.extend_from_slice(&memo::ID.to_bytes());
+        data.push(META_FLAG_SIGNER); // <-- the poisoned flag
+        data.extend_from_slice(&fake.to_bytes());
+        data.push(0x42);
+
+        let bad_ix = Instruction {
+            program_id: hydra_id(),
+            accounts: vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new(crank_pda, false),
+                AccountMeta::new_readonly(system_program, false),
+            ],
+            data,
+        };
+
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let result = mollusk.process_transaction_instructions(&[bad_ix], &accounts);
+        assert!(
+            result.raw_result.is_err(),
+            "create must reject signer flag in scheduled metas"
+        );
+    }
+
+    #[test]
+    fn trigger_rejects_before_slot() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let memo_data: &[u8] = b"tick";
+
+        // Start at slot u64::MAX - 1 so current_slot (small) never reaches it.
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            u64::MAX - 1,
+            100,
+            10,
+            0,
+            0, /* cu_limit */
+            memo::ID,
+            &[],
+            memo_data,
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let mut funded = after_create.resulting_accounts.clone();
+        for (k, a) in funded.iter_mut() {
+            if *k == crank_pda {
+                a.lamports += 1_000_000;
+            }
+        }
+
+        let trigger = trigger_ix(crank_pda, cranker);
+        let scheduled = Instruction {
+            program_id: memo::ID,
+            accounts: vec![],
+            data: memo_data.to_vec(),
+        };
+        let after = mollusk.process_transaction_instructions(&[trigger, scheduled], &funded);
+        assert!(
+            after.raw_result.is_err(),
+            "trigger must refuse before next_exec_slot"
+        );
+    }
+
+    #[test]
+    fn trigger_rejects_when_followup_mismatches() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0, /* cu_limit */
+            memo::ID,
+            &[],
+            b"expected",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let mut funded = after_create.resulting_accounts.clone();
+        for (k, a) in funded.iter_mut() {
+            if *k == crank_pda {
+                a.lamports += 1_000_000;
+            }
+        }
+
+        // Scheduled template says data = b"expected"; submit b"different" instead.
+        let trigger = trigger_ix(crank_pda, cranker);
+        let wrong = Instruction {
+            program_id: memo::ID,
+            accounts: vec![],
+            data: b"different".to_vec(),
+        };
+        let after = mollusk.process_transaction_instructions(&[trigger, wrong], &funded);
+        assert!(
+            after.raw_result.is_err(),
+            "trigger must reject mismatched followup"
+        );
+    }
+
+    #[test]
+    fn trigger_decrements_until_exhausted() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let memo_data: &[u8] = b"x";
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            0,
+            2,
+            0,
+            0, /* cu_limit */
+            memo::ID,
+            &[],
+            memo_data,
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let mut state = after_create.resulting_accounts.clone();
+        // Seed enough lamports for 2 triggers + safety buffer.
+        for (k, a) in state.iter_mut() {
+            if *k == crank_pda {
+                a.lamports += 1_000_000;
+            }
+        }
+
+        let trigger = trigger_ix(crank_pda, cranker);
+        let scheduled = Instruction {
+            program_id: memo::ID,
+            accounts: vec![],
+            data: memo_data.to_vec(),
+        };
+
+        // First trigger: remaining 2 -> 1.
+        let r1 =
+            mollusk.process_transaction_instructions(&[trigger.clone(), scheduled.clone()], &state);
+        assert!(r1.raw_result.is_ok(), "1st trigger: {:?}", r1.raw_result);
+        state = r1.resulting_accounts;
+
+        // Second trigger: remaining 1 -> 0 (now exhausted).
+        let r2 =
+            mollusk.process_transaction_instructions(&[trigger.clone(), scheduled.clone()], &state);
+        assert!(r2.raw_result.is_ok(), "2nd trigger: {:?}", r2.raw_result);
+        state = r2.resulting_accounts;
+
+        let header = {
+            let crank = state
+                .iter()
+                .find(|(k, _)| k == &crank_pda)
+                .map(|(_, a)| a)
+                .unwrap();
+            *decode_header(&crank.data)
+        };
+        assert_eq!(header.executed(), 2);
+        assert_eq!(header.remaining(), 0, "should be exhausted");
+
+        // Third trigger must fail: exhausted.
+        let r3 = mollusk.process_transaction_instructions(&[trigger, scheduled], &state);
+        assert!(
+            r3.raw_result.is_err(),
+            "3rd trigger must fail on exhausted crank"
+        );
+    }
+
+    #[test]
+    fn trigger_rejects_without_followup() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let recipient = Pubkey::new_unique();
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0, // cu_limit
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (recipient, Account::new(0, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        // Trigger alone — no follow-up.
+        let trigger = trigger_ix(crank_pda, cranker);
+        let result =
+            mollusk.process_transaction_instructions(&[trigger], &after_create.resulting_accounts);
+        assert!(
+            result.raw_result.is_err(),
+            "trigger should fail without follow-up, got: {:?}",
+            result.raw_result
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Multiple scheduled instructions
+    // ---------------------------------------------------------------------------
+
+    /// Build the sibling `Instruction` for a memo with the given data + metas.
+    #[cfg(test)]
+    fn memo_sibling(metas: &[(Pubkey, bool)], data: &[u8]) -> Instruction {
+        Instruction {
+            program_id: memo::ID,
+            accounts: metas
+                .iter()
+                .map(|(pk, w)| {
+                    if *w {
+                        AccountMeta::new(*pk, false)
+                    } else {
+                        AccountMeta::new_readonly(*pk, false)
+                    }
+                })
+                .collect(),
+            data: data.to_vec(),
         }
     }
 
-    let close = close_ix(reporter, crank_pda, reporter);
-    let after = mollusk.process_transaction_instructions(&[close], &funded);
-    assert!(after.raw_result.is_err(), "healthy crank must refuse Close");
-}
-
-#[test]
-fn close_permissionless_when_stuck() {
-    let mut mollusk = mollusk_with_hydra();
-    mollusk.sysvars.clock.slot = STALENESS_THRESHOLD_SLOTS + 1;
-
-    let payer = Pubkey::new_unique();
-    let reporter = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        0,
-        100,
-        10,
-        0,
-        0, // cu_limit
-        memo::ID,
-        &[],
-        b"tick",
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (reporter, Account::new(0, 0, &system_program)),
-        (system_program, system_program_acct),
-    ];
-
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
-
-    let mut funded = after_create.resulting_accounts.clone();
-    for (k, a) in funded.iter_mut() {
-        if *k == crank_pda {
-            a.lamports += 10_000_000;
+    /// Fund a crank PDA in a resulting-accounts vector by `delta` lamports.
+    #[cfg(test)]
+    fn top_up(accounts: &mut [(Pubkey, Account)], crank: Pubkey, delta: u64) {
+        for (k, a) in accounts.iter_mut() {
+            if *k == crank {
+                a.lamports += delta;
+            }
         }
     }
 
-    let close = close_ix(reporter, crank_pda, reporter);
-    let after = mollusk.process_transaction_instructions(&[close], &funded);
-    assert!(
-        after.raw_result.is_ok(),
-        "stuck crank should permit Close: {:?}",
-        after.raw_result
-    );
-}
+    #[test]
+    fn create_legacy_single_ix_wire_still_works() {
+        // A client built before multi-instruction support emits the Create payload
+        // WITHOUT any instruction count: scheduling prefix, then exactly one ix
+        // blob. This must keep working byte-for-byte (the new parser reads blobs
+        // until the data is exhausted, so one blob == the legacy layout).
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let tick: &[u8] = b"tick";
 
-#[test]
-fn create_rejects_signer_flag_in_metas() {
-    // Manually build data with META_FLAG_SIGNER set on a meta, bypassing
-    // the `create_ix` helper which only accepts (pubkey, is_writable).
-    use hydra_api::consts::META_FLAG_SIGNER;
+        let mut data = vec![ix::CREATE];
+        data.extend_from_slice(&SEED);
+        data.extend_from_slice(&[0u8; 32]); // authority
+        data.extend_from_slice(&0u64.to_le_bytes()); // start_slot
+        data.extend_from_slice(&100u64.to_le_bytes()); // interval
+        data.extend_from_slice(&10u64.to_le_bytes()); // remaining
+        data.extend_from_slice(&0u64.to_le_bytes()); // tip
+        data.extend_from_slice(&0u32.to_le_bytes()); // cu_limit
+                                                     // single ix blob — NO count byte.
+        data.push(0u8); // num_accounts
+        data.extend_from_slice(&(tick.len() as u16).to_le_bytes());
+        data.extend_from_slice(&memo::ID.to_bytes());
+        data.extend_from_slice(tick);
 
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let fake = Pubkey::new_unique();
+        let legacy_ix = Instruction {
+            program_id: hydra_id(),
+            accounts: vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new(crank_pda, false),
+                AccountMeta::new_readonly(keyed_account_for_system_program().0, false),
+            ],
+            data,
+        };
 
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let mut data = vec![ix::CREATE];
-    data.extend_from_slice(&SEED);
-    data.extend_from_slice(&[0u8; 32]); // authority
-    data.extend_from_slice(&0u64.to_le_bytes()); // start_slot
-    data.extend_from_slice(&100u64.to_le_bytes()); // interval_slots
-    data.extend_from_slice(&10u64.to_le_bytes()); // remaining
-    data.extend_from_slice(&0u64.to_le_bytes()); // tip
-    data.extend_from_slice(&0u32.to_le_bytes()); // cu_limit
-    data.push(1u8); // num_accounts
-    data.extend_from_slice(&1u16.to_le_bytes()); // data_len
-    data.extend_from_slice(&memo::ID.to_bytes());
-    data.push(META_FLAG_SIGNER); // <-- the poisoned flag
-    data.extend_from_slice(&fake.to_bytes());
-    data.push(0x42);
-
-    let bad_ix = Instruction {
-        program_id: hydra_id(),
-        accounts: vec![
-            AccountMeta::new(payer, true),
-            AccountMeta::new(crank_pda, false),
-            AccountMeta::new_readonly(system_program, false),
-        ],
-        data,
-    };
-
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (system_program, system_program_acct),
-    ];
-    let result = mollusk.process_transaction_instructions(&[bad_ix], &accounts);
-    assert!(
-        result.raw_result.is_err(),
-        "create must reject signer flag in scheduled metas"
-    );
-}
-
-#[test]
-fn trigger_rejects_before_slot() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let cranker = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let memo_data: &[u8] = b"tick";
-
-    // Start at slot u64::MAX - 1 so current_slot (small) never reaches it.
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        u64::MAX - 1,
-        100,
-        10,
-        0,
-        0, /* cu_limit */
-        memo::ID,
-        &[],
-        memo_data,
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let (memo_id, memo_acct) = memo::keyed_account();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (cranker, Account::new(0, 0, &system_program)),
-        (memo_id, memo_acct),
-        (system_program, system_program_acct),
-    ];
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
-
-    let mut funded = after_create.resulting_accounts.clone();
-    for (k, a) in funded.iter_mut() {
-        if *k == crank_pda {
-            a.lamports += 1_000_000;
-        }
-    }
-
-    let trigger = trigger_ix(crank_pda, cranker);
-    let scheduled = Instruction {
-        program_id: memo::ID,
-        accounts: vec![],
-        data: memo_data.to_vec(),
-    };
-    let after = mollusk.process_transaction_instructions(&[trigger, scheduled], &funded);
-    assert!(
-        after.raw_result.is_err(),
-        "trigger must refuse before next_exec_slot"
-    );
-}
-
-#[test]
-fn trigger_rejects_when_followup_mismatches() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let cranker = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        0,
-        100,
-        10,
-        0,
-        0, /* cu_limit */
-        memo::ID,
-        &[],
-        b"expected",
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let (memo_id, memo_acct) = memo::keyed_account();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (cranker, Account::new(0, 0, &system_program)),
-        (memo_id, memo_acct),
-        (system_program, system_program_acct),
-    ];
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
-
-    let mut funded = after_create.resulting_accounts.clone();
-    for (k, a) in funded.iter_mut() {
-        if *k == crank_pda {
-            a.lamports += 1_000_000;
-        }
-    }
-
-    // Scheduled template says data = b"expected"; submit b"different" instead.
-    let trigger = trigger_ix(crank_pda, cranker);
-    let wrong = Instruction {
-        program_id: memo::ID,
-        accounts: vec![],
-        data: b"different".to_vec(),
-    };
-    let after = mollusk.process_transaction_instructions(&[trigger, wrong], &funded);
-    assert!(
-        after.raw_result.is_err(),
-        "trigger must reject mismatched followup"
-    );
-}
-
-#[test]
-fn trigger_decrements_until_exhausted() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let cranker = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let memo_data: &[u8] = b"x";
-
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        0,
-        0,
-        2,
-        0,
-        0, /* cu_limit */
-        memo::ID,
-        &[],
-        memo_data,
-    );
-
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let (memo_id, memo_acct) = memo::keyed_account();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (cranker, Account::new(0, 0, &system_program)),
-        (memo_id, memo_acct),
-        (system_program, system_program_acct),
-    ];
-
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
-
-    let mut state = after_create.resulting_accounts.clone();
-    // Seed enough lamports for 2 triggers + safety buffer.
-    for (k, a) in state.iter_mut() {
-        if *k == crank_pda {
-            a.lamports += 1_000_000;
-        }
-    }
-
-    let trigger = trigger_ix(crank_pda, cranker);
-    let scheduled = Instruction {
-        program_id: memo::ID,
-        accounts: vec![],
-        data: memo_data.to_vec(),
-    };
-
-    // First trigger: remaining 2 -> 1.
-    let r1 =
-        mollusk.process_transaction_instructions(&[trigger.clone(), scheduled.clone()], &state);
-    assert!(r1.raw_result.is_ok(), "1st trigger: {:?}", r1.raw_result);
-    state = r1.resulting_accounts;
-
-    // Second trigger: remaining 1 -> 0 (now exhausted).
-    let r2 =
-        mollusk.process_transaction_instructions(&[trigger.clone(), scheduled.clone()], &state);
-    assert!(r2.raw_result.is_ok(), "2nd trigger: {:?}", r2.raw_result);
-    state = r2.resulting_accounts;
-
-    let header = {
-        let crank = state
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let r = mollusk.process_transaction_instructions(&[legacy_ix], &accounts);
+        assert!(
+            r.raw_result.is_ok(),
+            "legacy single-ix Create wire must still work: {:?}",
+            r.raw_result
+        );
+        let crank_acct = r
+            .resulting_accounts
             .iter()
             .find(|(k, _)| k == &crank_pda)
             .map(|(_, a)| a)
             .unwrap();
-        *decode_header(&crank.data)
-    };
-    assert_eq!(header.executed(), 2);
-    assert_eq!(header.remaining(), 0, "should be exhausted");
+        assert_eq!(
+            decode_header(&crank_acct.data).region_len() as usize,
+            region_len_for(0, tick.len()),
+            "one scheduled ix region"
+        );
+    }
 
-    // Third trigger must fail: exhausted.
-    let r3 = mollusk.process_transaction_instructions(&[trigger, scheduled], &state);
-    assert!(
-        r3.raw_result.is_err(),
-        "3rd trigger must fail on exhausted crank"
-    );
-}
+    #[test]
+    fn create_multi_writes_concatenated_region() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let acct_a = Pubkey::new_unique();
 
-#[test]
-fn trigger_rejects_without_followup() {
-    let mollusk = mollusk_with_hydra();
-    let payer = Pubkey::new_unique();
-    let cranker = Pubkey::new_unique();
-    let (crank_pda, _bump) = find_crank(&SEED);
-    let recipient = Pubkey::new_unique();
+        let ix = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::writable(acct_a)],
+                    data: b"first",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"second",
+                },
+            ],
+        );
 
-    let create = create_ix(
-        payer,
-        crank_pda,
-        SEED,
-        [0u8; 32],
-        0,
-        100,
-        10,
-        0,
-        0, // cu_limit
-        memo::ID,
-        &[],
-        b"tick",
-    );
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
 
-    let (system_program, system_program_acct) = keyed_account_for_system_program();
-    let (memo_id, memo_acct) = memo::keyed_account();
-    let accounts = vec![
-        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
-        (crank_pda, Account::default()),
-        (cranker, Account::new(0, 0, &system_program)),
-        (recipient, Account::new(0, 0, &system_program)),
-        (memo_id, memo_acct),
-        (system_program, system_program_acct),
-    ];
+        let result = mollusk.process_transaction_instructions(&[ix], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "create multi failed: {:?}",
+            result.raw_result
+        );
 
-    let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
-    assert!(after_create.raw_result.is_ok());
+        let crank_acct = result
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank account");
 
-    // Trigger alone — no follow-up.
-    let trigger = trigger_ix(crank_pda, cranker);
-    let result =
-        mollusk.process_transaction_instructions(&[trigger], &after_create.resulting_accounts);
-    assert!(
-        result.raw_result.is_err(),
-        "trigger should fail without follow-up, got: {:?}",
-        result.raw_result
-    );
+        let expected_region =
+            region_len_for(1, b"first".len()) + region_len_for(0, b"second".len());
+        let header = decode_header(&crank_acct.data);
+        assert_eq!(
+            header.region_len() as usize,
+            expected_region,
+            "region_len = sum of per-ix regions"
+        );
+        assert_eq!(
+            crank_acct.data.len(),
+            CRANK_HEADER_SIZE + expected_region,
+            "account size matches header + concatenated region"
+        );
+    }
+
+    #[test]
+    fn trigger_runs_two_scheduled_ixs() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let priority_tip: u64 = 2_500;
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            priority_tip,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"alpha",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"beta",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let cranker_starting: u64 = 0;
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(cranker_starting, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            after_create.raw_result.is_ok(),
+            "create failed: {:?}",
+            after_create.raw_result
+        );
+
+        let mut funded = after_create.resulting_accounts.clone();
+        top_up(&mut funded, crank_pda, 1_000_000);
+
+        let trigger = trigger_ix(crank_pda, cranker);
+        let r = mollusk.process_transaction_instructions(
+            &[
+                trigger,
+                memo_sibling(&[], b"alpha"),
+                memo_sibling(&[], b"beta"),
+            ],
+            &funded,
+        );
+        assert!(
+            r.raw_result.is_ok(),
+            "trigger with 2 siblings failed: {:?}",
+            r.raw_result
+        );
+
+        let crank_acct = r
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .unwrap();
+        let cranker_acct = r
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &cranker)
+            .map(|(_, a)| a)
+            .unwrap();
+
+        // One Trigger = one reward + one schedule advance, regardless of ix count.
+        assert_eq!(
+            cranker_acct.lamports,
+            cranker_starting + CRANKER_REWARD + priority_tip,
+            "single reward per trigger"
+        );
+        let header = decode_header(&crank_acct.data);
+        assert_eq!(header.executed(), 1);
+        assert_eq!(header.remaining(), 9);
+        assert_eq!(header.next_exec_slot(), 100);
+    }
+
+    #[test]
+    fn trigger_rejects_second_followup_mismatch() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"alpha",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"beta",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+        let mut funded = after_create.resulting_accounts.clone();
+        top_up(&mut funded, crank_pda, 1_000_000);
+
+        let trigger = trigger_ix(crank_pda, cranker);
+        // Second sibling carries the wrong data.
+        let r = mollusk.process_transaction_instructions(
+            &[
+                trigger,
+                memo_sibling(&[], b"alpha"),
+                memo_sibling(&[], b"WRONG"),
+            ],
+            &funded,
+        );
+        assert!(
+            r.raw_result.is_err(),
+            "trigger must reject when the 2nd scheduled ix mismatches"
+        );
+    }
+
+    #[test]
+    fn trigger_rejects_missing_second_followup() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"alpha",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"beta",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+        let mut funded = after_create.resulting_accounts.clone();
+        top_up(&mut funded, crank_pda, 1_000_000);
+
+        // Only the first scheduled ix is present; the second is missing.
+        let trigger = trigger_ix(crank_pda, cranker);
+        let r = mollusk
+            .process_transaction_instructions(&[trigger, memo_sibling(&[], b"alpha")], &funded);
+        assert!(
+            r.raw_result.is_err(),
+            "trigger must reject when a scheduled ix is missing"
+        );
+    }
+
+    #[test]
+    fn trigger_rejects_reordered_followups() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"alpha",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[],
+                    data: b"beta",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+        let mut funded = after_create.resulting_accounts.clone();
+        top_up(&mut funded, crank_pda, 1_000_000);
+
+        // Siblings present but swapped.
+        let trigger = trigger_ix(crank_pda, cranker);
+        let r = mollusk.process_transaction_instructions(
+            &[
+                trigger,
+                memo_sibling(&[], b"beta"),
+                memo_sibling(&[], b"alpha"),
+            ],
+            &funded,
+        );
+        assert!(
+            r.raw_result.is_err(),
+            "trigger must reject reordered scheduled ixs"
+        );
+    }
+
+    #[test]
+    fn create_rejects_zero_instructions() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let ix = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[], // zero instructions
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let r = mollusk.process_transaction_instructions(&[ix], &accounts);
+        assert!(
+            r.raw_result.is_err(),
+            "create must reject zero scheduled instructions"
+        );
+    }
+
+    #[test]
+    fn create_rejects_signer_flag_in_second_ix() {
+        use hydra_api::consts::META_FLAG_SIGNER;
+
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let fake = Pubkey::new_unique();
+
+        // Build wire by hand so we can set the signer flag on the 2nd ix's meta.
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let mut data = vec![ix::CREATE];
+        data.extend_from_slice(&SEED);
+        data.extend_from_slice(&[0u8; 32]);
+        data.extend_from_slice(&0u64.to_le_bytes()); // start_slot
+        data.extend_from_slice(&100u64.to_le_bytes()); // interval
+        data.extend_from_slice(&10u64.to_le_bytes()); // remaining
+        data.extend_from_slice(&0u64.to_le_bytes()); // tip
+        data.extend_from_slice(&0u32.to_le_bytes()); // cu_limit
+                                                     // ix 0: clean, no accounts.
+        data.push(0u8);
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&memo::ID.to_bytes());
+        data.push(0x41);
+        // ix 1: poisoned signer meta.
+        data.push(1u8);
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&memo::ID.to_bytes());
+        data.push(META_FLAG_SIGNER);
+        data.extend_from_slice(&fake.to_bytes());
+        data.push(0x42);
+
+        let bad_ix = Instruction {
+            program_id: hydra_id(),
+            accounts: vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new(crank_pda, false),
+                AccountMeta::new_readonly(system_program, false),
+            ],
+            data,
+        };
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let r = mollusk.process_transaction_instructions(&[bad_ix], &accounts);
+        assert!(
+            r.raw_result.is_err(),
+            "create must reject a signer flag in any scheduled ix"
+        );
+    }
+
+    #[test]
+    fn create_allows_max_instructions_and_rejects_one_more() {
+        use hydra_api::consts::MAX_INSTRUCTIONS;
+
+        let payer = Pubkey::new_unique();
+
+        // Exactly MAX_INSTRUCTIONS tiny memos -> ok.
+        let at_max: Vec<ScheduledIx> = (0..MAX_INSTRUCTIONS)
+            .map(|_| ScheduledIx {
+                program_id: memo::ID,
+                metas: &[],
+                data: b"m",
+            })
+            .collect();
+        {
+            let mollusk = mollusk_with_hydra();
+            let (crank_pda, _) = find_crank(&SEED);
+            let ix = create_ix_multi(payer, crank_pda, SEED, [0u8; 32], 0, 100, 10, 0, 0, &at_max);
+            let (system_program, sys_acct) = keyed_account_for_system_program();
+            let accounts = vec![
+                (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+                (crank_pda, Account::default()),
+                (system_program, sys_acct),
+            ];
+            let r = mollusk.process_transaction_instructions(&[ix], &accounts);
+            assert!(
+                r.raw_result.is_ok(),
+                "create must accept exactly MAX_INSTRUCTIONS: {:?}",
+                r.raw_result
+            );
+        }
+
+        // One past the cap -> rejected.
+        let over: Vec<ScheduledIx> = (0..MAX_INSTRUCTIONS + 1)
+            .map(|_| ScheduledIx {
+                program_id: memo::ID,
+                metas: &[],
+                data: b"m",
+            })
+            .collect();
+        {
+            let mollusk = mollusk_with_hydra();
+            const SEED_OVER: [u8; 32] = [0x55; 32];
+            let (crank_pda, _) = find_crank(&SEED_OVER);
+            let ix = create_ix_multi(
+                payer, crank_pda, SEED_OVER, [0u8; 32], 0, 100, 10, 0, 0, &over,
+            );
+            let (system_program, sys_acct) = keyed_account_for_system_program();
+            let accounts = vec![
+                (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+                (crank_pda, Account::default()),
+                (system_program, sys_acct),
+            ];
+            let r = mollusk.process_transaction_instructions(&[ix], &accounts);
+            assert!(
+                r.raw_result.is_err(),
+                "create must reject more than MAX_INSTRUCTIONS scheduled ixs"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_ixs_from_crank_roundtrip_triggers() {
+        // The cranker reconstructs siblings purely from on-chain crank bytes via
+        // `scheduled_ixs_from_crank`. Feeding those reconstructed ixs back as the
+        // followups must satisfy `Trigger` — proving the parse is byte-exact.
+        //
+        // Uses the noop target (not memo) so an account meta can be exercised: noop
+        // ignores its accounts, whereas SPL memo would reject a non-signer one.
+        let mut mollusk = mollusk_with_hydra();
+        load_noop(&mut mollusk);
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let writable_acct = Pubkey::new_unique();
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: NOOP_ID,
+                    metas: &[SchedMeta::writable(writable_acct)],
+                    data: b"one",
+                },
+                ScheduledIx {
+                    program_id: NOOP_ID,
+                    metas: &[],
+                    data: b"two",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (writable_acct, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(after_create.raw_result.is_ok());
+
+        let mut funded = after_create.resulting_accounts.clone();
+        top_up(&mut funded, crank_pda, 1_000_000);
+
+        // Reconstruct the siblings the same way the off-chain cranker does.
+        let crank_data = &funded.iter().find(|(k, _)| k == &crank_pda).unwrap().1.data;
+        let siblings = hydra_api::instruction::scheduled_ixs_from_crank(crank_data)
+            .expect("parse scheduled ixs");
+        assert_eq!(siblings.len(), 2, "two scheduled ixs reconstructed");
+
+        let mut tx_ixs = vec![trigger_ix(crank_pda, cranker)];
+        tx_ixs.extend(siblings);
+        let r = mollusk.process_transaction_instructions(&tx_ixs, &funded);
+        assert!(
+            r.raw_result.is_ok(),
+            "reconstructed siblings must satisfy Trigger: {:?}",
+            r.raw_result
+        );
+    }
 }

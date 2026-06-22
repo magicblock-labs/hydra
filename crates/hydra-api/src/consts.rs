@@ -10,8 +10,14 @@ pub const BASE_FEE_LAMPORTS: u64 = 5_000;
 /// Flat per-trigger reward paid to the cranker. Equals `2 × base_fee`.
 pub const CRANKER_REWARD: u64 = 2 * BASE_FEE_LAMPORTS;
 
-/// Max metas the scheduled ix may declare.
+/// Max metas a single scheduled ix may declare.
 pub const MAX_ACCOUNTS: usize = 32;
+
+/// Max number of scheduled instructions a single crank may hold. Bounds the
+/// `Create` validation cost and the crank account's rent footprint. The
+/// concatenated tail region must also fit `Crank.region_len` (a `u16`), which
+/// `Create` enforces independently.
+pub const MAX_INSTRUCTIONS: usize = 16;
 
 /// Max bytes of the scheduled ix's `data` field.
 pub const MAX_DATA_LEN: usize = 1024;

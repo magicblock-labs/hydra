@@ -6,30 +6,38 @@
 
 ## Packages
 
-| Package | Description | Version | Docs |
-|:--------|:------------|:--------|:-----|
-| `hydra` | Pinocchio `no_std` on-chain program | `0.1.0` | [Overview](#overview) |
+| Package     | Description                                  | Version | Docs                                    |
+| :---------- | :------------------------------------------- | :------ | :-------------------------------------- |
+| `hydra`     | Pinocchio `no_std` on-chain program          | `0.1.0` | [Overview](#overview)                   |
 | `hydra-api` | Shared Rust types, builders, and CPI helpers | `0.1.0` | [Integrating Hydra](#integrating-hydra) |
 
 ## Overview
 
-Hydra stores a scheduled instruction in a crank PDA and lets anyone trigger it
-when the schedule is due.
+Hydra stores one or more scheduled instructions in a crank PDA and lets anyone
+trigger them when the schedule is due.
 
-Each trigger transaction has two instructions:
+Each trigger transaction places the scheduled instructions immediately after
+`Trigger`:
 
 ```text
-ix[k]   = Hydra.Trigger
-ix[k+1] = scheduled instruction
+ix[k]     = Hydra.Trigger
+ix[k+1]   = scheduled instruction 1
+ix[k+2]   = scheduled instruction 2
+…
+ix[k+n]   = scheduled instruction n
 ```
 
-`Trigger` verifies `ix[k+1]` against the bytes stored in the crank account. If
-the scheduled instruction fails, the whole transaction rolls back.
+`Trigger` verifies `ix[k+1..=k+n]` against the bytes stored in the crank
+account. Because the instructions sysvar lays instruction blobs out
+contiguously, this verification is a single `memcmp` regardless of `n`. If any
+scheduled instruction fails, the whole transaction rolls back.
 
 Key constraints:
 
 - scheduled instructions run top-level, not via CPI
 - scheduled instructions cannot require signer metas
+- the scheduled instructions must be contiguous and in order, right after `Trigger`
+- a crank holds at most `MAX_INSTRUCTIONS` (16) scheduled instructions
 - `Trigger` is top-level only
 
 ## Motivation
@@ -42,26 +50,33 @@ their own program; Hydra instead verifies the scheduled instruction
 against an on-chain template at the top level and lets the runtime
 execute it as a sibling ix. No CPI frame, no dispatch overhead.
 
-The cranker submits a plain two-instruction transaction; `Trigger`
-`memcmp`s `ix[k+1]` against the bytes stored on the crank PDA at
-`Create` time (~60 CU), collects the reward, and advances state.
-Solana transaction atomicity handles failure — if the scheduled
-instruction reverts, the whole tx reverts and Hydra's payout / state
-advance revert with it. The scheduled instruction itself runs top-level
-and gets the full CU budget and stack depth.
+The cranker submits a plain transaction (`Trigger` followed by the scheduled
+instructions); `Trigger` `memcmp`s `ix[k+1..]` against the bytes stored on the
+crank PDA at `Create` time (~60 CU), collects the reward, and advances state.
+The reward and the schedule advance are flat per `Trigger`, independent of how
+many instructions the crank holds. Solana transaction atomicity handles failure
+— if any scheduled instruction reverts, the whole tx reverts and Hydra's payout
+/ state advance revert with it. The scheduled instructions themselves run
+top-level and get the full CU budget and stack depth.
 
 ## Compute Units
 
 Measured with `logging` disabled:
 
-| Instruction | Hydra CU |
-|---|---:|
-| `Create` | 3292 |
-| `Trigger` | 464 |
-| `Trigger` (reject: no follow-up) | 378 |
-| `Cancel` | 128 |
-| `Close` (reject: healthy) | 139 |
-| `Close` (underfunded) | 150 |
+| Instruction                      | Hydra CU |
+| -------------------------------- | -------: |
+| `Create`                         |     5634 |
+| `Trigger` (happy, 1 sibling)     |      466 |
+| `Trigger` (happy, 3 siblings)    |      466 |
+| `Trigger` (reject: no follow-up) |      379 |
+| `Cancel`                         |      141 |
+| `Close` (reject: healthy)        |      270 |
+| `Close` (underfunded)            |      300 |
+
+`Trigger` costs the same whether the crank schedules one instruction or many —
+the single concatenated `memcmp` is the entire verification, so adding
+instructions adds no Hydra-side CU. `Create` scales with the total scheduled
+payload size (it is a one-time cost dominated by the account-creation syscall).
 
 Reproduce:
 
@@ -88,11 +103,11 @@ cargo test -p hydra-tests
 
 Use `hydra-api` from clients or from your own on-chain program.
 
-| Use case | Feature | API |
-|---|---|---|
-| Host-side client | `client` | `Instruction` builders |
-| `solana-program` / Anchor CPI | `cpi-native` | `hydra_api::cpi::native::*` |
-| Pinocchio CPI | `cpi-pinocchio` | `hydra_api::cpi::pinocchio::*` |
+| Use case                      | Feature         | API                            |
+| ----------------------------- | --------------- | ------------------------------ |
+| Host-side client              | `client`        | `Instruction` builders         |
+| `solana-program` / Anchor CPI | `cpi-native`    | `hydra_api::cpi::native::*`    |
+| Pinocchio CPI                 | `cpi-pinocchio` | `hydra_api::cpi::pinocchio::*` |
 
 `Trigger` is not exposed as a CPI helper. It must be sent as a top-level
 instruction.
@@ -106,7 +121,7 @@ Examples:
 ## Creating a Crank
 
 ```rust
-use hydra_api::instruction::{self as ix, CreateArgs};
+use hydra_api::instruction::{self as ix, CreateArgs, ScheduledIx};
 
 let seed = [0x42u8; 32];
 let (crank, _bump) = ix::find_crank_pda(&seed);
@@ -122,9 +137,12 @@ let create = ix::create(
         remaining: 0,
         priority_tip: 2_500,
         cu_limit: 0, // 0 = cranker omits SetComputeUnitLimit; cap 1_400_000
-        scheduled_program_id: memo::ID,
-        scheduled_metas: &[],
-        scheduled_data: b"tick",
+        // One or more scheduled ixs, run top-level in order after `Trigger`.
+        scheduled: &[ScheduledIx {
+            program_id: memo::ID,
+            metas: &[],
+            data: b"tick",
+        }],
     },
 );
 ```
@@ -167,11 +185,11 @@ not proof that the authority signed the schedule creation.
 
 A crank has two upfront costs and a small per-trigger fee:
 
-| | Amount | What happens to it |
-|---|---|---|
-| **Rent deposit** | ~0.002 SOL | Locked while the crank lives, refunded on close |
-| **Create tx fee** | 5,000 lamports | Standard Solana base fee |
-| **Per trigger** | 10,000 lamports + `priority_tip` | Drawn from the crank's balance, paid to the cranker |
+|                   | Amount                           | What happens to it                                  |
+| ----------------- | -------------------------------- | --------------------------------------------------- |
+| **Rent deposit**  | ~0.002 SOL                       | Locked while the crank lives, refunded on close     |
+| **Create tx fee** | 5,000 lamports                   | Standard Solana base fee                            |
+| **Per trigger**   | 10,000 lamports + `priority_tip` | Drawn from the crank's balance, paid to the cranker |
 
 The rent deposit scales with the scheduled instruction's size — ~0.002 SOL
 for a minimal ix, up to ~0.003 SOL with a handful of accounts and a bit of
@@ -221,17 +239,17 @@ When `--prometheus-port <PORT>` is set the cranker serves `/metrics` in
 Prometheus text format on `0.0.0.0:<PORT>`. All series are namespaced
 `hydra_cranker_*` and pre-initialised so `rate()` works from scrape 1.
 
-| Metric | Type | Labels | Meaning |
-|---|---|---|---|
-| `cranks_cached` | gauge | — | Cranks currently in the in-memory cache. |
-| `current_slot` | gauge | — | Last slot observed from `slotSubscribe`. |
-| `eligible_now` | gauge | — | Cranks eligible to trigger on the last slot tick. |
-| `triggers_submitted_total` | counter | `result={ok,err}` | Triggers submitted. |
-| `ws_reconnects_total` | counter | `source={program,slot}` | WS (re)connect attempts. |
-| `grpc_reconnects_total` | counter | `source={program,slot}` | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set). |
-| `cache_events_total` | counter | `kind={insert,update,remove}` | Cache mutations driven by `programSubscribe`. |
-| `sweep_duration_seconds` | histogram | — | Wall time per slot-tick sweep (scan + fire). Buckets target sub-10 ms. |
-| `rpc_errors_total` | counter | `op={get_program_accounts,get_latest_blockhash,send_transaction}` | RPC call errors, by failing operation. |
+| Metric                     | Type      | Labels                                                            | Meaning                                                                |
+| -------------------------- | --------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `cranks_cached`            | gauge     | —                                                                 | Cranks currently in the in-memory cache.                               |
+| `current_slot`             | gauge     | —                                                                 | Last slot observed from `slotSubscribe`.                               |
+| `eligible_now`             | gauge     | —                                                                 | Cranks eligible to trigger on the last slot tick.                      |
+| `triggers_submitted_total` | counter   | `result={ok,err}`                                                 | Triggers submitted.                                                    |
+| `ws_reconnects_total`      | counter   | `source={program,slot}`                                           | WS (re)connect attempts.                                               |
+| `grpc_reconnects_total`    | counter   | `source={program,slot}`                                           | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set). |
+| `cache_events_total`       | counter   | `kind={insert,update,remove}`                                     | Cache mutations driven by `programSubscribe`.                          |
+| `sweep_duration_seconds`   | histogram | —                                                                 | Wall time per slot-tick sweep (scan + fire). Buckets target sub-10 ms. |
+| `rpc_errors_total`         | counter   | `op={get_program_accounts,get_latest_blockhash,send_transaction}` | RPC call errors, by failing operation.                                 |
 
 Useful alerts:
 
@@ -244,12 +262,12 @@ Useful alerts:
 
 ## Instruction Reference
 
-| Disc | Name | Accounts | Data |
-|---:|---|---|---|
-| 0 | `Create` | `payer(w,s), crank(w), system_program` | schedule payload |
-| 1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar` | none |
-| 2 | `Cancel` | `authority(s), crank(w), recipient(w)` | none |
-| 3 | `Close` | `reporter(s,w), crank(w), recipient(w)` | none |
+| Disc | Name      | Accounts                                      | Data             |
+| ---: | --------- | --------------------------------------------- | ---------------- |
+|    0 | `Create`  | `payer(w,s), crank(w), system_program`        | schedule payload |
+|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar` | none             |
+|    2 | `Cancel`  | `authority(s), crank(w), recipient(w)`        | none             |
+|    3 | `Close`   | `reporter(s,w), crank(w), recipient(w)`       | none             |
 
 To add lamports to a live crank, send a plain `system_program::transfer` to
 the crank PDA — no dedicated instruction exists.

@@ -60,7 +60,7 @@ pub fn fire_trigger(
     priority_fee_micro_lamports: u64,
     skip_preflight: bool,
 ) -> Result<()> {
-    let scheduled = ix::scheduled_ix_from_crank(&entry.data)
+    let scheduled = ix::scheduled_ixs_from_crank(&entry.data)
         .ok_or_else(|| anyhow!("malformed crank tail for {}", entry.pubkey))?;
     let trigger = ix::trigger(entry.pubkey, cranker.pubkey());
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {
@@ -70,9 +70,10 @@ pub fn fire_trigger(
             .inc();
         anyhow::Error::new(e).context("latest_blockhash")
     })?;
-    // `verify_followup` requires `scheduled` at `current_ix_index + 1`, so
-    // it must sit immediately after `Trigger`; ComputeBudget ixs go before.
-    let mut ixs: Vec<Instruction> = Vec::with_capacity(4);
+    // `verify_followup` requires the scheduled ixs at `current_ix_index + 1 ..`,
+    // contiguous and in order, so they must sit immediately after `Trigger`;
+    // ComputeBudget ixs go before.
+    let mut ixs: Vec<Instruction> = Vec::with_capacity(3 + scheduled.len());
     if entry.cu_limit > 0 {
         ixs.push(set_compute_unit_limit(entry.cu_limit));
     }
@@ -80,7 +81,7 @@ pub fn fire_trigger(
         ixs.push(set_compute_unit_price(priority_fee_micro_lamports));
     }
     ixs.push(trigger);
-    ixs.push(scheduled);
+    ixs.extend(scheduled);
     let msg = Message::new_with_blockhash(&ixs, Some(&cranker.pubkey()), &blockhash);
     let tx = Transaction::new(&[cranker], msg, blockhash);
     // Preflight catches reverts before the leader charges fees, but also

@@ -13,7 +13,7 @@ use pinocchio::{
 
 use hydra_api::{
     consts::{ix as disc, MAX_ACCOUNTS, MAX_DATA_LEN},
-    instruction::CREATE_FIXED_PREFIX_LEN,
+    instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN},
 };
 
 program_entrypoint!(process);
@@ -22,9 +22,10 @@ nostd_panic_handler!();
 
 const DISC_SCHEDULE: u8 = 0;
 
-/// Stack-allocated buffer big enough for any Hydra `Create` payload:
-/// `1 byte disc + CREATE_FIXED_PREFIX_LEN + 33*MAX_ACCOUNTS + MAX_DATA_LEN`.
-const CREATE_BUF_MAX: usize = 1 + CREATE_FIXED_PREFIX_LEN + 33 * MAX_ACCOUNTS + MAX_DATA_LEN;
+/// Stack-allocated buffer big enough for a single-scheduled-ix Hydra `Create`
+/// payload: `disc + sched prefix + one ix blob`.
+const CREATE_BUF_MAX: usize =
+    1 + CREATE_FIXED_PREFIX_LEN + CREATE_IX_HEADER_LEN + 33 * MAX_ACCOUNTS + MAX_DATA_LEN;
 
 pub fn process(_program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let [disc_byte, rest @ ..] = data else {
@@ -73,7 +74,7 @@ fn schedule(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     cursor += 8;
     buf[cursor..cursor + 4].copy_from_slice(&0u32.to_le_bytes()); // cu_limit (omit)
     cursor += 4;
-    buf[cursor] = 0; // num_accounts
+    buf[cursor] = 0; // num_accounts (single scheduled ix; parsed until data ends)
     cursor += 1;
     buf[cursor..cursor + 2].copy_from_slice(&(tick_len as u16).to_le_bytes());
     cursor += 2;
