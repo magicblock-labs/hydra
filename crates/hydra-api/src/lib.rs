@@ -18,4 +18,7 @@ pub use state::Crank;
 
 use solana_address::declare_id;
 
+#[cfg(not(feature = "ephemeral"))]
 declare_id!("Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea");
+#[cfg(feature = "ephemeral")]
+declare_id!("eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf");

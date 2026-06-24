@@ -27,7 +27,7 @@ const DISC_SCHEDULE: u8 = 0;
 const CREATE_BUF_MAX: usize =
     1 + CREATE_FIXED_PREFIX_LEN + CREATE_IX_HEADER_LEN + 33 * MAX_ACCOUNTS + MAX_DATA_LEN;
 
-pub fn process(_program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(_program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [disc_byte, rest @ ..] = data else {
         return Err(ProgramError::InvalidInstructionData);
     };

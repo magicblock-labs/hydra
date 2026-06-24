@@ -15,17 +15,14 @@ nostd_panic_handler!();
 
 pub fn process_instruction(
     _program_id: &Address,
-    accounts: &mut [AccountView],
+    accounts: &[AccountView],
     instruction_data: &[u8],
 ) -> ProgramResult {
     inner_process_instruction(accounts, instruction_data).inspect_err(log_error)
 }
 
 #[inline(never)]
-fn inner_process_instruction(
-    accounts: &mut [AccountView],
-    instruction_data: &[u8],
-) -> ProgramResult {
+fn inner_process_instruction(accounts: &[AccountView], instruction_data: &[u8]) -> ProgramResult {
     let [discriminator, rest @ ..] = instruction_data else {
         return Err(HydraError::InvalidInstruction.into());
     };

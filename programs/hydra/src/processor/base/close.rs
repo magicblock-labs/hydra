@@ -13,18 +13,14 @@ use hydra_api::{
 };
 
 use crate::helpers::get_clock_slot;
+use crate::processor::common::{require_refund_recipient, require_signed_crank};
 
-pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
+pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [reporter, crank_ai, recipient] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !reporter.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-    if !crank_ai.owned_by(&hydra_api::ID) {
-        return Err(ProgramError::InvalidAccountOwner);
-    }
+    require_signed_crank(reporter, crank_ai)?;
 
     // Snapshot fields we need from the crank header.
     let (stored_authority, remaining, rent_min, priority_tip, next_exec_slot, lamports_now) = {
@@ -59,11 +55,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
         return Err(HydraError::NotClosable.into());
     }
 
-    // Anti-grief: if an authority is set, only they can receive the refund.
-    // Anyone can still invoke Close, but they can't redirect the rent refund.
-    if stored_authority != [0u8; 32] && recipient.address().as_array() != &stored_authority {
-        return Err(HydraError::UnauthorizedAuthority.into());
-    }
+    require_refund_recipient(stored_authority, recipient)?;
 
     // Flat bounty (2 × base fee) to whoever cranked the cleanup; the balance
     // refunds to `recipient`. `min` handles a crank holding less than the

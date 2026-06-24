@@ -24,8 +24,11 @@ cpi-native = [
 # `pinocchio::cpi::invoke_signed` with `InstructionView`s built on the
 # stack (no allocations, usable from `no_std` programs).
 cpi-pinocchio = ["pinocchio/cpi"]
+# Ephemeral-rollup crank instructions use a different program ID.
+ephemeral = []
 
 [dependencies]
+ephemeral-rollups-pinocchio = { workspace = true }
 pinocchio = { workspace = true }
 solana-address = { workspace = true }
 solana-instruction = { workspace = true, optional = true }

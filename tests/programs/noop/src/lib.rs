@@ -14,10 +14,6 @@ program_entrypoint!(process);
 no_allocator!();
 nostd_panic_handler!();
 
-pub fn process(
-    _program_id: &Address,
-    _accounts: &mut [AccountView],
-    _data: &[u8],
-) -> ProgramResult {
+pub fn process(_program_id: &Address, _accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     Ok(())
 }

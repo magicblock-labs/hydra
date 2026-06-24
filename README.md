@@ -262,6 +262,10 @@ Useful alerts:
 
 ## Instruction Reference
 
+Discriminators `0–3` are the base-layer crank. Discriminators `4–7` are the
+[ephemeral-rollup crank](#ephemeral-rollup-crank-feature-ephemeral), compiled
+only under the `ephemeral` feature.
+
 | Disc | Name      | Accounts                                      | Data             |
 | ---: | --------- | --------------------------------------------- | ---------------- |
 |    0 | `Create`  | `payer(w,s), crank(w), system_program`        | schedule payload |
@@ -279,6 +283,76 @@ the crank PDA — no dedicated instruction exists.
 - `MAX_ACCOUNTS = 32`
 - `MAX_DATA_LEN = 1024`
 - reward is fixed at `10_000` lamports plus the stored priority tip
+
+## Ephemeral Rollup Crank (feature `ephemeral`)
+
+Behind the optional `ephemeral` cargo feature, Hydra exposes a parallel set of
+instructions that run a crank on a [MagicBlock](https://magicblock.gg) **ephemeral
+rollup (ER)**, where the crank lives as a MagicBlock **ephemeral account** instead
+of a base-layer PDA. The default (mainnet) build neither compiles this code nor
+pulls its dependency (`ephemeral-rollups-pinocchio`).
+
+The model is the same as the base crank — a crank stores scheduled instructions,
+anyone triggers them when due, and `Trigger` verifies the follow-up siblings with
+the same single `memcmp` — with two differences the ER forces:
+
+- **Ephemeral accounts hold zero lamports.** Rent (a flat per-byte fee) is paid by
+  a sponsor into a shared vault, not held in the account. So there is no cranker
+  reward, no priority-tip payout, and no rent floor: `TriggerEphemeral` only
+  verifies the follow-up ix and advances the schedule (slot check, decrement
+  `remaining`, bump `executed`).
+- **Creation is a single instruction.** The Magic program materializes the
+  ephemeral account synchronously, so `CreateEphemeral` allocates the crank (via a
+  Magic CPI signed by the crank PDA) and writes its header + scheduled-ix tail in
+  one instruction — no separate init step.
+
+Lifecycle: `CreateEphemeral` → `TriggerEphemeral` (+ scheduled siblings, run
+top-level on the ER) → `CancelEphemeral` (authority-gated) / `CloseEphemeral`
+(permissionless, when the crank is exhausted or stuck). `Cancel`/`Close` CPI the
+Magic program to close the ephemeral account and refund the vault rent to the
+sponsor; if a non-zero `authority` is set, only that authority may close it. The
+crank PDA derivation (`[b"crank", seed]`) and the on-chain `Crank` layout are
+unchanged, so the template / verification model is identical.
+
+### Instruction Reference (ephemeral)
+
+| Disc | Name               | Accounts                                            | Data             |
+| ---: | ------------------ | --------------------------------------------------- | ---------------- |
+|    4 | `CreateEphemeral`  | `sponsor(w,s), crank(w), vault(w), magic_program`   | schedule payload |
+|    5 | `TriggerEphemeral` | `crank(w), cranker(w,s), instructions_sysvar`       | none             |
+|    6 | `CancelEphemeral`  | `authority(w,s), crank(w), vault(w), magic_program` | none             |
+|    7 | `CloseEphemeral`   | `reporter(w,s), crank(w), vault(w), magic_program`  | none             |
+
+`vault` is the ephemeral rent vault and `magic_program` is MagicBlock's Magic
+program; `hydra-api` exposes both as `consts::magic::EPHEMERAL_VAULT_ID` /
+`MAGIC_PROGRAM_ID`, and the `client`-feature builder fills them in. `sponsor` must
+be an account delegated to the ER (it pays the rent and sets `authority_signer`).
+
+Build a `CreateEphemeral` with the same `CreateArgs` as base `create`:
+
+```rust
+use hydra_api::instruction::{self as ix, CreateArgs, ScheduledIx};
+
+let (crank, _bump) = ix::find_crank_pda(&seed);
+let create = ix::create_ephemeral(
+    sponsor_pubkey,
+    crank,
+    &CreateArgs { seed, authority, start_slot: 0, interval_slots: 50,
+                  remaining: 0, priority_tip: 0, cu_limit: 0, scheduled },
+);
+```
+
+### Build & test
+
+```sh
+# Build the program with the ephemeral instructions.
+cargo build-sbf --manifest-path programs/hydra/Cargo.toml -- --features ephemeral
+
+# End-to-end lifecycle tests run against a local MagicSVM simulator. `tests/ephemeral`
+# is an isolated crate (its own lockfile); see its module docs for the exact steps.
+cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
+cargo test --manifest-path tests/ephemeral/Cargo.toml
+```
 
 ## Releasing
 

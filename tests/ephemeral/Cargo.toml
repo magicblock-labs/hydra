@@ -1,0 +1,35 @@
+# Isolated from the main Hydra workspace: MagicSVM pulls a solana-3.x + git-fork
+# stack (litesvm, magicblock-svm) that conflicts with Hydra's mollusk/agave-4.0
+# test deps. Its own `[workspace]` table gives it an independent lockfile.
+[workspace]
+
+[package]
+name = "hydra-ephemeral-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+# `Crank`, consts and `find_crank_pda` — all on solana-address, no client/cpi
+# features so no extra solana-instruction/pubkey skew.
+ephemeral-rollups-pinocchio = "0.15"
+hydra-api = { path = "../../crates/hydra-api", features = [
+    "client",
+    "ephemeral",
+] }
+magicsvm = { path = "../../../magicsvm/crates/magicsvm" }
+solana-account = { git = "https://github.com/magicblock-labs/magicblock-svm.git", rev = "5bd1d56" }
+solana-address = { version = "2.6", features = ["decode", "curve25519"] }
+solana-instruction = "3.0"
+solana-keypair = "3.1"
+solana-message = "3.0.1"
+solana-signer = "3.0"
+solana-transaction = "3.0"
+solana-hash = "3.1.0"
+
+
+[patch.crates-io]
+solana-account = { git = "https://github.com/magicblock-labs/magicblock-svm.git", rev = "5bd1d56" }

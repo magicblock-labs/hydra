@@ -5,7 +5,11 @@
 pub const CRANK_SEED_PREFIX: &[u8] = b"crank";
 
 /// Solana base transaction fee (lamports per signature).
+#[cfg(not(feature = "ephemeral"))]
 pub const BASE_FEE_LAMPORTS: u64 = 5_000;
+/// 100x cheaper on the ephemeral rollup.
+#[cfg(feature = "ephemeral")]
+pub const BASE_FEE_LAMPORTS: u64 = 50;
 
 /// Flat per-trigger reward paid to the cranker. Equals `2 × base_fee`.
 pub const CRANKER_REWARD: u64 = 2 * BASE_FEE_LAMPORTS;
@@ -34,12 +38,18 @@ pub const CRANK_HEADER_SIZE: usize = 120;
 /// "don't emit `SetComputeUnitLimit`" (inherits the 200 k/ix default).
 pub const MAX_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
 
+/// Expected number of slots per day.
+#[cfg(not(feature = "ephemeral"))]
+pub const SLOT_FREQUENCY_MS: u64 = 400;
+#[cfg(feature = "ephemeral")]
+pub const SLOT_FREQUENCY_MS: u64 = 50;
+
 /// Slots of overdue past `next_exec_slot` after which a crank is considered
 /// stuck and `Close` becomes permissionlessly callable. `next_exec_slot` only
-/// advances on successful `Trigger`, so a crank whose inner ix deterministically
+/// advances on successful `Trigger`, so a crank whose inner ixs deterministically
 /// fails (or whose target is paused) would otherwise pin its rent forever.
-/// ~10 days at 400 ms/slot: 10 × 86_400 / 0.4 = 2_160_000.
-pub const STALENESS_THRESHOLD_SLOTS: u64 = 2_160_000;
+/// ~10 days
+pub const STALENESS_THRESHOLD_SLOTS: u64 = 10 * 86_400_000 / SLOT_FREQUENCY_MS;
 
 /// Per-meta size in both the on-chain template bytes and the instructions
 /// sysvar wire format: `[1 flag byte][32-byte pubkey]`.

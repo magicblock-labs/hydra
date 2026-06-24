@@ -52,6 +52,7 @@ mod client {
     use solana_pubkey::{pubkey, Pubkey};
 
     use crate::consts::{ix, META_FLAG_WRITABLE};
+    use crate::instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN};
 
     /// Solana's built-in instructions sysvar pubkey.
     pub const INSTRUCTIONS_SYSVAR_ID: Pubkey =
@@ -104,102 +105,217 @@ mod client {
         pub data: &'a [u8],
     }
 
-    /// All the scheduling knobs for `Create`
-    pub struct CreateArgs<'a> {
-        pub seed: [u8; 32],
-        /// All-zeros = unkillable (no cancel authority).
-        pub authority: [u8; 32],
-        pub start_slot: u64,
-        pub interval_slots: u64,
-        /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
-        pub remaining: u64,
-        pub priority_tip: u64,
-        /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
-        /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
-        /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
-        pub cu_limit: u32,
-        /// The scheduled instructions, in execution order. Must be non-empty
-        pub scheduled: &'a [ScheduledIx<'a>],
-    }
+    #[cfg(not(feature = "ephemeral"))]
+    mod base {
+        use super::*;
 
-    /// Build a `Create` instruction.
-    pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
-        let body_len: usize = args
-            .scheduled
-            .iter()
-            .map(|s| super::CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
-            .sum();
-        let mut data = Vec::with_capacity(1 + super::CREATE_FIXED_PREFIX_LEN + body_len);
-        data.push(ix::CREATE);
-        data.extend_from_slice(&args.seed);
-        data.extend_from_slice(&args.authority);
-        data.extend_from_slice(&args.start_slot.to_le_bytes());
-        data.extend_from_slice(&args.interval_slots.to_le_bytes());
-        data.extend_from_slice(&args.remaining.to_le_bytes());
-        data.extend_from_slice(&args.priority_tip.to_le_bytes());
-        data.extend_from_slice(&args.cu_limit.to_le_bytes());
-        for s in args.scheduled {
-            data.push(s.metas.len() as u8);
-            data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
-            data.extend_from_slice(&s.program_id.to_bytes());
-            for m in s.metas {
-                let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
-                data.push(flag);
-                data.extend_from_slice(&m.pubkey.to_bytes());
+        /// All the scheduling knobs for `Create`
+        pub struct CreateArgs<'a> {
+            pub seed: [u8; 32],
+            /// All-zeros = unkillable (no cancel authority).
+            pub authority: [u8; 32],
+            pub start_slot: u64,
+            pub interval_slots: u64,
+            /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
+            pub remaining: u64,
+            pub priority_tip: u64,
+            /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
+            /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
+            /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
+            pub cu_limit: u32,
+            /// The scheduled instructions, in execution order. Must be non-empty
+            pub scheduled: &'a [ScheduledIx<'a>],
+        }
+
+        /// Build a `Create` instruction scheduling a single instruction.
+        pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
+            let body_len: usize = args
+                .scheduled
+                .iter()
+                .map(|s| CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
+                .sum();
+            let mut data = Vec::with_capacity(1 + CREATE_FIXED_PREFIX_LEN + body_len);
+            data.push(ix::CREATE);
+            data.extend_from_slice(&args.seed);
+            data.extend_from_slice(&args.authority);
+            data.extend_from_slice(&args.start_slot.to_le_bytes());
+            data.extend_from_slice(&args.interval_slots.to_le_bytes());
+            data.extend_from_slice(&args.remaining.to_le_bytes());
+            data.extend_from_slice(&args.priority_tip.to_le_bytes());
+            data.extend_from_slice(&args.cu_limit.to_le_bytes());
+            for s in args.scheduled {
+                data.push(s.metas.len() as u8);
+                data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
+                data.extend_from_slice(&s.program_id.to_bytes());
+                for m in s.metas {
+                    let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
+                    data.push(flag);
+                    data.extend_from_slice(&m.pubkey.to_bytes());
+                }
+                data.extend_from_slice(s.data);
             }
-            data.extend_from_slice(s.data);
+
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new(payer, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                ],
+                data,
+            }
         }
 
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new(payer, true),
-                AccountMeta::new(crank, false),
-                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            ],
-            data,
+        /// Build a `Trigger` instruction. Must be paired in the same tx with the
+        /// scheduled instruction at `current_ix_index + 1`.
+        pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(cranker, true),
+                    AccountMeta::new_readonly(INSTRUCTIONS_SYSVAR_ID, false),
+                ],
+                data: alloc::vec![ix::TRIGGER],
+            }
+        }
+
+        /// Build a `Cancel` instruction.
+        pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new_readonly(authority, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
+                ],
+                data: alloc::vec![ix::CANCEL],
+            }
+        }
+
+        /// Build a `Close` instruction (permissionless cleanup).
+        pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new(reporter, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
+                ],
+                data: alloc::vec![ix::CLOSE],
+            }
         }
     }
 
-    /// Build a `Trigger` instruction. Must be paired in the same tx with the
-    /// scheduled instruction at `current_ix_index + 1`.
-    pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new(crank, false),
-                AccountMeta::new(cranker, true),
-                AccountMeta::new_readonly(INSTRUCTIONS_SYSVAR_ID, false),
-            ],
-            data: alloc::vec![ix::TRIGGER],
+    #[cfg(feature = "ephemeral")]
+    mod ephemeral {
+        use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
+
+        use super::*;
+
+        /// All the scheduling knobs for `CreateEphemeral`
+        pub struct CreateArgs<'a> {
+            pub seed: [u8; 32],
+            /// All-zeros = unkillable (no cancel authority).
+            pub authority: [u8; 32],
+            pub start_slots: u64,
+            pub interval_slots: u64,
+            /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
+            pub remaining: u64,
+            pub priority_tip: u64,
+            /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
+            /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
+            /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
+            pub cu_limit: u32,
+            /// The scheduled instructions, in execution order. Must be non-empty
+            pub scheduled: &'a [ScheduledIx<'a>],
+        }
+
+        /// Build a `Create` instruction
+        pub fn create(sponsor: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
+            let body_len: usize = args
+                .scheduled
+                .iter()
+                .map(|s| super::CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
+                .sum();
+            let mut data = Vec::with_capacity(1 + super::CREATE_FIXED_PREFIX_LEN + body_len);
+            data.push(ix::CREATE);
+            data.extend_from_slice(&args.seed);
+            data.extend_from_slice(&args.authority);
+            data.extend_from_slice(&args.start_slots.to_le_bytes());
+            data.extend_from_slice(&args.interval_slots.to_le_bytes());
+            data.extend_from_slice(&args.remaining.to_le_bytes());
+            data.extend_from_slice(&args.priority_tip.to_le_bytes());
+            data.extend_from_slice(&args.cu_limit.to_le_bytes());
+            for s in args.scheduled {
+                data.push(s.metas.len() as u8);
+                data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
+                data.extend_from_slice(&s.program_id.to_bytes());
+                for m in s.metas {
+                    let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
+                    data.push(flag);
+                    data.extend_from_slice(&m.pubkey.to_bytes());
+                }
+                data.extend_from_slice(s.data);
+            }
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new(sponsor, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(EPHEMERAL_VAULT_ID, false),
+                    AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
+                ],
+                data,
+            }
+        }
+
+        /// Build a `Trigger` instruction.
+        pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(cranker, true),
+                    AccountMeta::new_readonly(INSTRUCTIONS_SYSVAR_ID, false),
+                ],
+                data: alloc::vec![ix::TRIGGER],
+            }
+        }
+
+        /// Build a `Cancel` instruction
+        pub fn cancel(authority: Pubkey, crank: Pubkey) -> Instruction {
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new(authority, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(EPHEMERAL_VAULT_ID, false),
+                    AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
+                ],
+                data: alloc::vec![ix::CANCEL],
+            }
+        }
+
+        /// Build a `Close` instruction
+        pub fn close(reporter: Pubkey, crank: Pubkey) -> Instruction {
+            Instruction {
+                program_id: program_id(),
+                accounts: alloc::vec![
+                    AccountMeta::new(reporter, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(EPHEMERAL_VAULT_ID, false),
+                    AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
+                ],
+                data: alloc::vec![ix::CLOSE],
+            }
         }
     }
 
-    /// Build a `Cancel` instruction.
-    pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new_readonly(authority, true),
-                AccountMeta::new(crank, false),
-                AccountMeta::new(recipient, false),
-            ],
-            data: alloc::vec![ix::CANCEL],
-        }
-    }
-
-    /// Build a `Close` instruction (permissionless cleanup).
-    pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new(reporter, true),
-                AccountMeta::new(crank, false),
-                AccountMeta::new(recipient, false),
-            ],
-            data: alloc::vec![ix::CLOSE],
-        }
-    }
+    #[cfg(not(feature = "ephemeral"))]
+    pub use base::*;
+    #[cfg(feature = "ephemeral")]
+    pub use ephemeral::*;
 
     /// Reconstruct all scheduled instructions from a crank's raw account bytes.
     /// This is what an off-chain cranker does to build the sibling ixs that
