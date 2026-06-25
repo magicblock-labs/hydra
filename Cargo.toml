@@ -6,6 +6,7 @@ members = [
     "crates/hydra-api",
     "crates/hydra-cranker",
     "tests",
+    "tests/e2e",
     "tests/programs/noop",
     "examples/native",
     "examples/pinocchio",

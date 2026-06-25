@@ -219,6 +219,14 @@ hydra-cranker \
   --rpc-url https://your.rpc.example \
   --ws-url wss://your.rpc.example
 
+# Against a MagicBlock ephemeral rollup. `--ephemeral` switches the target
+# program, the `Close` account layout, and the (zero-lamport) funding model at
+# runtime — the same binary drives either program, no rebuild needed.
+hydra-cranker \
+  --keypair ~/.config/solana/cranker.json \
+  --rpc-url https://your.rollup.example \
+  --ephemeral
+
 # With Prometheus metrics at http://0.0.0.0:9100/metrics
 hydra-cranker \
   --keypair ~/.config/solana/cranker.json \
@@ -353,6 +361,29 @@ cargo build-sbf --manifest-path programs/hydra/Cargo.toml -- --features ephemera
 cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
 cargo test --manifest-path tests/ephemeral/Cargo.toml
 ```
+
+#### Live end-to-end test (`tests/e2e`)
+
+`tests/ephemeral` runs in-process against MagicSVM. `tests/e2e` instead boots the
+**real** three-process stack — `mb-test-validator` (base L1), `ephemeral-validator` (the rollup), and `hydra-cranker` — creates a few ephemeral cranks, and
+asserts the cranker fires each one on schedule.
+
+The validators ship as an npm package; `mb-test-validator` wraps
+`solana-test-validator`, so the Solana/Anza toolchain must also be installed:
+
+```sh
+npm install -g @magicblock-labs/ephemeral-validator   # mb-test-validator + ephemeral-validator
+
+# Build the on-chain artifacts the rollup clones (the hydra-cranker is built
+# automatically by the test and run with `--ephemeral`).
+cargo build-sbf -- --features ephemeral
+cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
+
+# The test is `#[ignore]` (it spawns external validators); run it explicitly.
+cargo test --manifest-path tests/e2e/Cargo.toml -- --ignored --nocapture
+```
+
+CI runs this as the `e2e` job in `.github/workflows/ci.yml`.
 
 ## Releasing
 

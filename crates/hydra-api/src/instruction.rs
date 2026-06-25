@@ -61,15 +61,13 @@ mod client {
     /// Solana's system program pubkey.
     pub const SYSTEM_PROGRAM_ID: Pubkey = pubkey!("11111111111111111111111111111111");
 
+    /// The [`base`] / [`ephemeral`] programs.
+    pub const BASE_PROGRAM_ID: Pubkey = pubkey!("Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea");
+    pub const EPHEMERAL_PROGRAM_ID: Pubkey = pubkey!("eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf");
+
     /// Hydra program ID as a `solana_pubkey::Pubkey` (convenience for clients).
     pub fn program_id() -> Pubkey {
         Pubkey::new_from_array(crate::ID.to_bytes())
-    }
-
-    /// Derive `(crank_pda, bump)` using `solana_pubkey::Pubkey`.
-    pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
-        let (addr, bump) = crate::state::find_crank_pda(seed);
-        (Pubkey::new_from_array(addr.to_bytes()), bump)
     }
 
     /// A scheduled-ix meta as it will be stored on-chain.
@@ -105,9 +103,17 @@ mod client {
         pub data: &'a [u8],
     }
 
-    #[cfg(not(feature = "ephemeral"))]
-    mod base {
+    /// Builders targeting the base-layer Hydra program ([`BASE_PROGRAM_ID`]).
+    pub mod base {
         use super::*;
+
+        /// This module's program ID.
+        pub const PROGRAM_ID: Pubkey = super::BASE_PROGRAM_ID;
+
+        /// Derive `(crank_pda, bump)` under the base program.
+        pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
+            Pubkey::find_program_address(&[crate::consts::CRANK_SEED_PREFIX, seed], &PROGRAM_ID)
+        }
 
         /// All the scheduling knobs for `Create`
         pub struct CreateArgs<'a> {
@@ -156,7 +162,7 @@ mod client {
             }
 
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(payer, true),
                     AccountMeta::new(crank, false),
@@ -170,7 +176,7 @@ mod client {
         /// scheduled instruction at `current_ix_index + 1`.
         pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(crank, false),
                     AccountMeta::new(cranker, true),
@@ -183,7 +189,7 @@ mod client {
         /// Build a `Cancel` instruction.
         pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new_readonly(authority, true),
                     AccountMeta::new(crank, false),
@@ -196,7 +202,7 @@ mod client {
         /// Build a `Close` instruction (permissionless cleanup).
         pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(reporter, true),
                     AccountMeta::new(crank, false),
@@ -207,11 +213,20 @@ mod client {
         }
     }
 
-    #[cfg(feature = "ephemeral")]
-    mod ephemeral {
+    /// Builders targeting the ephemeral-rollup Hydra program
+    /// ([`EPHEMERAL_PROGRAM_ID`]).
+    pub mod ephemeral {
         use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
 
         use super::*;
+
+        /// This module's program ID.
+        pub const PROGRAM_ID: Pubkey = super::EPHEMERAL_PROGRAM_ID;
+
+        /// Derive `(crank_pda, bump)` under the ephemeral program.
+        pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
+            Pubkey::find_program_address(&[crate::consts::CRANK_SEED_PREFIX, seed], &PROGRAM_ID)
+        }
 
         /// All the scheduling knobs for `CreateEphemeral`
         pub struct CreateArgs<'a> {
@@ -259,7 +274,7 @@ mod client {
                 data.extend_from_slice(s.data);
             }
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(sponsor, true),
                     AccountMeta::new(crank, false),
@@ -273,7 +288,7 @@ mod client {
         /// Build a `Trigger` instruction.
         pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(crank, false),
                     AccountMeta::new(cranker, true),
@@ -286,7 +301,7 @@ mod client {
         /// Build a `Cancel` instruction
         pub fn cancel(authority: Pubkey, crank: Pubkey) -> Instruction {
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(authority, true),
                     AccountMeta::new(crank, false),
@@ -300,7 +315,7 @@ mod client {
         /// Build a `Close` instruction
         pub fn close(reporter: Pubkey, crank: Pubkey) -> Instruction {
             Instruction {
-                program_id: program_id(),
+                program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(reporter, true),
                     AccountMeta::new(crank, false),

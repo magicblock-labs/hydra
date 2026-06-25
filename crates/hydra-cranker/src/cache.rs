@@ -10,7 +10,9 @@ use std::{
 
 use solana_pubkey::Pubkey;
 
-use hydra_api::consts::{CRANKER_REWARD, CRANK_HEADER_SIZE, STALENESS_THRESHOLD_SLOTS};
+use hydra_api::consts::{
+    CRANKER_REWARD, CRANK_HEADER_SIZE, REMAINING_INFINITE, STALENESS_THRESHOLD_SLOTS,
+};
 
 /// Minimal decoded projection of a Crank account — just the fields we need
 /// for eligibility checks. The full raw bytes live in `data` so the trigger
@@ -23,6 +25,10 @@ pub struct CrankEntry {
     /// recipient. Non-zero = `Close` must refund the remainder to this pubkey.
     pub authority: [u8; 32],
     pub next_exec_slot: u64,
+    /// Slots between executions. `Trigger` advances `next_exec_slot` by exactly
+    /// this much on-chain, so the cranker can replay that advance locally the
+    /// instant it submits — without waiting for the `programSubscribe` echo.
+    pub interval_slots: u64,
     pub remaining: u64,
     pub priority_tip: u64,
     pub rent_min: u64,
@@ -40,6 +46,7 @@ impl CrankEntry {
         }
         let authority: [u8; 32] = data[0..32].try_into().ok()?;
         let next_exec_slot = u64::from_le_bytes(data[64..72].try_into().ok()?);
+        let interval_slots = u64::from_le_bytes(data[72..80].try_into().ok()?);
         let remaining = u64::from_le_bytes(data[80..88].try_into().ok()?);
         let priority_tip = u64::from_le_bytes(data[88..96].try_into().ok()?);
         let rent_min = u64::from_le_bytes(data[104..112].try_into().ok()?);
@@ -49,6 +56,7 @@ impl CrankEntry {
             lamports,
             authority,
             next_exec_slot,
+            interval_slots,
             remaining,
             priority_tip,
             rent_min,
@@ -100,6 +108,31 @@ pub enum CacheOutcome {
     Unchanged,
 }
 
+/// Replay `Trigger`'s on-chain effect on the cached entry the moment we submit,
+/// so re-fire timing follows the crank's own `interval_slots` instead of waiting
+/// for the `programSubscribe` echo (which lags by an unbounded number of slots).
+///
+/// Mirrors `processor/*/trigger.rs`: `next_exec_slot += interval_slots` and
+/// `remaining -= 1` (the `u64::MAX` "infinite" sentinel never decrements). Guarded
+/// by an equality check on `next_exec_slot`: if a notification already advanced the
+/// entry past the snapshot we fired on, that authoritative update wins and we don't
+/// double-advance. A late, *pre*-trigger notification can still overwrite this with
+/// a stale value — that self-heals, because the next fire then lands as
+/// `NotYetExecutable` and the caller's backoff absorbs it.
+pub fn advance_after_trigger(cache: &Cache, pubkey: Pubkey, fired_at_next_exec: u64) {
+    let mut guard = cache.lock().expect("cache poisoned");
+    if let Some(e) = guard.get_mut(&pubkey) {
+        // Only the entry we actually fired on; a newer echo supersedes us.
+        if e.next_exec_slot != fired_at_next_exec {
+            return;
+        }
+        e.next_exec_slot = e.next_exec_slot.saturating_add(e.interval_slots);
+        if e.remaining != REMAINING_INFINITE && e.remaining != 0 {
+            e.remaining -= 1;
+        }
+    }
+}
+
 /// Apply a single account update to the cache. Removes entries that have
 /// been closed (zero lamports / empty data) or are no longer well-formed
 /// Crank accounts; otherwise inserts/updates the decoded entry.
@@ -130,5 +163,83 @@ pub fn apply_update(cache: &Cache, pubkey: Pubkey, lamports: u64, data: &[u8]) -
                 CacheOutcome::Unchanged
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(next_exec_slot: u64, interval_slots: u64, remaining: u64) -> CrankEntry {
+        CrankEntry {
+            pubkey: Pubkey::new_unique(),
+            lamports: u64::MAX,
+            authority: [0u8; 32],
+            next_exec_slot,
+            interval_slots,
+            remaining,
+            priority_tip: 0,
+            rent_min: 0,
+            cu_limit: 0,
+            data: Vec::new(),
+        }
+    }
+
+    fn seed(cache: &Cache, e: CrankEntry) -> Pubkey {
+        let pk = e.pubkey;
+        cache.lock().unwrap().insert(pk, e);
+        pk
+    }
+
+    fn snapshot(cache: &Cache, pk: &Pubkey) -> (u64, u64) {
+        let g = cache.lock().unwrap();
+        let e = g.get(pk).unwrap();
+        (e.next_exec_slot, e.remaining)
+    }
+
+    #[test]
+    fn advance_replays_trigger_effect() {
+        let cache = new_cache();
+        let pk = seed(&cache, entry(100, 5, 3));
+        advance_after_trigger(&cache, pk, 100);
+        assert_eq!(
+            snapshot(&cache, &pk),
+            (105, 2),
+            "next_exec += interval, remaining -= 1"
+        );
+    }
+
+    #[test]
+    fn advance_is_skipped_when_a_newer_echo_already_moved_the_entry() {
+        let cache = new_cache();
+        // A `programSubscribe` update landed first, advancing the entry to 105.
+        let pk = seed(&cache, entry(105, 5, 2));
+        // We fired on the older snapshot (100); the guard must not double-advance.
+        advance_after_trigger(&cache, pk, 100);
+        assert_eq!(
+            snapshot(&cache, &pk),
+            (105, 2),
+            "stale fire must not advance"
+        );
+    }
+
+    #[test]
+    fn advance_keeps_the_infinite_remaining_sentinel() {
+        let cache = new_cache();
+        let pk = seed(&cache, entry(100, 1, REMAINING_INFINITE));
+        advance_after_trigger(&cache, pk, 100);
+        assert_eq!(
+            snapshot(&cache, &pk),
+            (101, REMAINING_INFINITE),
+            "infinite cranks advance the schedule but never decrement remaining"
+        );
+    }
+
+    #[test]
+    fn advance_does_not_underflow_an_exhausted_crank() {
+        let cache = new_cache();
+        let pk = seed(&cache, entry(100, 1, 0));
+        advance_after_trigger(&cache, pk, 100);
+        assert_eq!(snapshot(&cache, &pk).1, 0, "remaining == 0 stays 0");
     }
 }

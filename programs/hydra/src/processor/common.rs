@@ -1,6 +1,6 @@
 //! Shared helpers for the ephemeral-rollup crank processors.
 
-use pinocchio::{error::ProgramError, Address, AccountView, ProgramResult};
+use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
 use hydra_api::{
     consts::{
@@ -198,7 +198,14 @@ pub(super) fn write_crank(
 
     // SAFETY: split yields CRANK_HEADER_SIZE bytes; Crank is align-1 (compile-time checked).
     let state = unsafe { load_crank_mut(header_bytes)? };
-    write_header(state, header, bump, authority_signer, rent_min, region_len as u16);
+    write_header(
+        state,
+        header,
+        bump,
+        authority_signer,
+        rent_min,
+        region_len as u16,
+    );
     Ok(())
 }
 

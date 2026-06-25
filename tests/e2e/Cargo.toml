@@ -1,0 +1,28 @@
+[package]
+name = "hydra-e2e-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+# The ephemeral feature gives us the `eHyd…` program ID and the ephemeral
+# `Create`/`Trigger` account layouts that match the deployed program.
+# `client` only — the ephemeral builders are reached at runtime via
+# `instruction::ephemeral::*`, matching how the cranker selects its program.
+hydra-api = { path = "../../crates/hydra-api", features = ["client"] }
+
+anyhow = "1"
+crossbeam-channel = "0.5"
+
+solana-client = "=4.0.0-beta.7"
+solana-pubsub-client = "=4.0.0-beta.7"
+solana-rpc-client-api = "=4.0.0-beta.7"
+solana-signature = "3"
+solana-commitment-config = "3.1"
+solana-keypair = "3.1"
+solana-signer = "3"
+solana-pubkey = "4.0"
+solana-instruction = "3.0"
+solana-message = "3.1"
+solana-transaction = "3.1"
+solana-system-interface = { version = "2.0", features = ["bincode"] }

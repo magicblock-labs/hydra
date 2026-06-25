@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Pinned Solana/Agave toolchain that ships `cargo build-sbf`.
+  SOLANA_VERSION: stable
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Formatting — covers both the main workspace and the isolated `tests/ephemeral`
+  # crate (it has its own `[workspace]`, so `--all` on the root doesn't reach it).
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (rustfmt)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: rustfmt
+
+      - name: Format — main workspace
+        run: cargo fmt --all --check
+
+      - name: Format — tests/ephemeral crate
+        run: cargo fmt --manifest-path tests/ephemeral/Cargo.toml --all --check
+
+      - name: Format — tests/e2e crate
+        run: cargo fmt --manifest-path tests/e2e/Cargo.toml --all --check
+
+  # ---------------------------------------------------------------------------
+  # Default feature set: lint + tests with the `ephemeral` feature OFF.
+  # ---------------------------------------------------------------------------
+  default:
+    name: lint + test (default)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (clippy)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: clippy
+
+      - name: Install Solana toolchain (build-sbf)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build on-chain programs
+        run: |
+          cargo build-sbf --manifest-path programs/hydra/Cargo.toml
+          cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
+
+      - name: Test
+        run: cargo nextest run -p hydra-tests
+
+  # ---------------------------------------------------------------------------
+  # `ephemeral` feature set: lint + the end-to-end lifecycle tests that run
+  # against MagicSVM. The `tests/ephemeral` crate pulls `magicsvm` via a sibling
+  # path dependency (`../../../magicsvm/crates/magicsvm`), so it's checked out
+  # next to this repo.
+  # ---------------------------------------------------------------------------
+  ephemeral:
+    name: lint + test (ephemeral)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hydra
+        uses: actions/checkout@v4
+        with:
+          path: hydra
+
+      - name: Install Rust (clippy)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: clippy
+
+      - name: Install Solana toolchain (build-sbf)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            hydra
+            hydra/tests/ephemeral
+
+      - name: Clippy — program (ephemeral)
+        working-directory: hydra
+        run: cargo clippy -p hydra --features ephemeral --all-targets -- -D warnings
+
+      - name: Clippy — ephemeral test crate
+        working-directory: hydra
+        run: cargo clippy --manifest-path tests/ephemeral/Cargo.toml --all-targets -- -D warnings
+
+      - name: Build on-chain programs (ephemeral)
+        working-directory: hydra
+        run: |
+          cargo build-sbf --manifest-path programs/hydra/Cargo.toml -- --features ephemeral
+          cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
+
+      - name: Test — ephemeral lifecycle
+        working-directory: hydra
+        run: cargo nextest run --manifest-path tests/ephemeral/Cargo.toml
+
+  # ---------------------------------------------------------------------------
+  # Live end-to-end: boots the real three-process stack (mb-test-validator +
+  # ephemeral-validator + hydra-cranker) and asserts ephemeral cranks fire on
+  # schedule. The validators ship as the `@magicblock-labs/ephemeral-validator`
+  # npm package (mb-test-validator wraps `solana-test-validator`, which the Anza
+  # toolchain provides). The `tests/e2e` crate is its own `[workspace]`.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: e2e (ephemeral cranks, live validators)
+    runs-on: ubuntu-latest
+    env:
+      # Pin to the version the test was developed against.
+      EPHEMERAL_VALIDATOR_VERSION: 0.12.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (clippy)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: clippy
+
+      - name: Install Solana toolchain (build-sbf + solana-test-validator)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install MagicBlock validators (mb-test-validator + ephemeral-validator)
+        run: |
+          npm install -g "@magicblock-labs/ephemeral-validator@${EPHEMERAL_VALIDATOR_VERSION}"
+          mb-test-validator --version
+          ephemeral-validator --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tests/e2e
+
+      - name: Clippy — e2e crate
+        run: cargo clippy --manifest-path tests/e2e/Cargo.toml --all-targets -- -D warnings
+
+      - name: Build on-chain programs (ephemeral)
+        run: |
+          cargo build-sbf --manifest-path programs/hydra/Cargo.toml -- --features ephemeral
+          cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
+
+      - name: Test — live ephemeral cranks
+        # The test is `#[ignore]` (spawns external validators); it builds the
+        # hydra-cranker itself and runs it with `--ephemeral`.
+        run: cargo test --manifest-path tests/e2e/Cargo.toml -- --ignored --nocapture --test-threads=1
