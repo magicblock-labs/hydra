@@ -24,7 +24,7 @@ const EXAMPLE_SO: &str = concat!(
 const HYDRA_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/deploy/hydra");
 
 fn hydra_id() -> Pubkey {
-    Pubkey::new_from_array(hydra_api::ID.to_bytes())
+    Pubkey::new_from_array(hydra_api::base::ID.to_bytes())
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn schedule_creates_crank_via_cpi_into_hydra() {
     // Derive the crank PDA. The seed must match what the example hard-codes
     // into its `CreateArgs` (it just passes through the user-supplied seed).
     let seed = [0x33u8; 32];
-    let (crank_addr, _bump) = hydra_api::state::find_crank_pda(&seed);
+    let (crank_addr, _bump) = hydra_api::state::find_base_crank_pda(&seed);
     let crank = Pubkey::new_from_array(crank_addr.to_bytes());
     let payer = Pubkey::new_unique();
     let target_program_id = Pubkey::new_unique();

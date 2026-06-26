@@ -22,7 +22,7 @@ use solana_program_error::{ProgramError, ProgramResult};
 use solana_pubkey::Pubkey;
 
 use hydra_api::{
-    cpi::native as hydra_cpi,
+    cpi::base::native as hydra_cpi,
     instruction::{CreateArgs, ScheduledIx},
 };
 
@@ -55,7 +55,7 @@ pub fn process_instruction(
             priority_tip: 1_000,
             cu_limit: 0, // no on-chain CU override
             scheduled: &[ScheduledIx {
-                program_id: target_program_id,
+                program_id: target_program_id.to_bytes(),
                 metas: &[],
                 data: b"tick",
             }],

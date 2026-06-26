@@ -521,7 +521,7 @@ fn create_crank(
     let (crank, _bump) = eph::find_crank_pda(&seed);
     let fire_id = crank_fire_id(crank_index);
     let sched = ScheduledIx {
-        program_id: noop,
+        program_id: noop.to_bytes(),
         metas: &[],
         data: &fire_id.to_le_bytes(),
     };

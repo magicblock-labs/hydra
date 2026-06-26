@@ -56,7 +56,7 @@ fn schedule(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     };
 
     // Build Hydra Create data on the stack.
-    hydra_api::cpi::pinocchio::create::<CREATE_BUF_MAX>(
+    hydra_api::cpi::base::pinocchio::create::<CREATE_BUF_MAX>(
         payer,
         crank,
         system_program,

@@ -39,6 +39,119 @@ pub const CREATE_FIXED_PREFIX_LEN: usize = 32 +  // seed
 /// `num_accounts: u8`, `data_len: u16 LE`, `program_id: [u8; 32]`.
 pub const CREATE_IX_HEADER_LEN: usize = 1 + 2 + 32; // = 35
 
+/// A scheduled-ix meta as it will be stored on-chain.
+///
+/// `is_signer` is intentionally absent: scheduled ixs cannot carry
+/// signer flags (enforced by `Create`), and the on-chain template
+/// stores only the writable bit anyway.
+#[derive(Clone, Copy)]
+pub struct SchedMeta {
+    pub pubkey: [u8; 32],
+    pub is_writable: bool,
+}
+
+impl SchedMeta {
+    pub fn readonly(pubkey: [u8; 32]) -> Self {
+        Self {
+            pubkey,
+            is_writable: false,
+        }
+    }
+    pub fn writable(pubkey: [u8; 32]) -> Self {
+        Self {
+            pubkey,
+            is_writable: true,
+        }
+    }
+}
+
+/// One scheduled instruction template.
+pub struct ScheduledIx<'a> {
+    pub program_id: [u8; 32],
+    pub metas: &'a [SchedMeta],
+    pub data: &'a [u8],
+}
+
+/// All the scheduling knobs for `CreateEphemeral`
+pub struct CreateArgs<'a> {
+    pub seed: [u8; 32],
+    /// All-zeros = unkillable (no cancel authority).
+    pub authority: [u8; 32],
+    pub start_slot: u64,
+    pub interval_slots: u64,
+    /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
+    pub remaining: u64,
+    pub priority_tip: u64,
+    /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
+    /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
+    /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
+    pub cu_limit: u32,
+    /// The scheduled instructions, in execution order. Must be non-empty
+    pub scheduled: &'a [ScheduledIx<'a>],
+}
+
+impl CreateArgs<'_> {
+    pub fn body_len(&self) -> usize {
+        self.scheduled
+            .iter()
+            .map(|s| CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
+            .sum()
+    }
+
+    pub fn write_to(&self, data: &mut [u8]) -> usize {
+        let mut off = 0;
+
+        data[off] = ix::CREATE;
+        off += 1;
+
+        data[off..off + 32].copy_from_slice(&self.seed);
+        off += 32;
+
+        data[off..off + 32].copy_from_slice(&self.authority);
+        off += 32;
+
+        data[off..off + 8].copy_from_slice(&self.start_slot.to_le_bytes());
+        off += 8;
+
+        data[off..off + 8].copy_from_slice(&self.interval_slots.to_le_bytes());
+        off += 8;
+
+        data[off..off + 8].copy_from_slice(&self.remaining.to_le_bytes());
+        off += 8;
+
+        data[off..off + 8].copy_from_slice(&self.priority_tip.to_le_bytes());
+        off += 8;
+
+        data[off..off + 4].copy_from_slice(&self.cu_limit.to_le_bytes());
+        off += 4;
+
+        for s in self.scheduled {
+            data[off] = s.metas.len() as u8;
+            off += 1;
+
+            data[off..off + 2].copy_from_slice(&(s.data.len() as u16).to_le_bytes());
+            off += 2;
+
+            data[off..off + 32].copy_from_slice(&s.program_id);
+            off += 32;
+
+            for m in s.metas {
+                let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
+                data[off] = flag;
+                off += 1;
+
+                data[off..off + 32].copy_from_slice(&m.pubkey);
+                off += 32;
+            }
+
+            data[off..off + s.data.len()].copy_from_slice(s.data);
+            off += s.data.len();
+        }
+
+        off
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client builders
 // ---------------------------------------------------------------------------
@@ -53,6 +166,8 @@ mod client {
 
     use crate::consts::{ix, META_FLAG_WRITABLE};
     use crate::instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN};
+
+    use super::*;
 
     /// Solana's built-in instructions sysvar pubkey.
     pub const INSTRUCTIONS_SYSVAR_ID: Pubkey =
@@ -74,121 +189,9 @@ mod client {
         Pubkey::new_from_array(crate::ephemeral::ID.to_bytes())
     }
 
-    /// A scheduled-ix meta as it will be stored on-chain.
-    ///
-    /// `is_signer` is intentionally absent: scheduled ixs cannot carry
-    /// signer flags (enforced by `Create`), and the on-chain template
-    /// stores only the writable bit anyway.
-    #[derive(Clone, Copy)]
-    pub struct SchedMeta {
-        pub pubkey: Pubkey,
-        pub is_writable: bool,
-    }
-
-    impl SchedMeta {
-        pub fn readonly(pubkey: Pubkey) -> Self {
-            Self {
-                pubkey,
-                is_writable: false,
-            }
-        }
-        pub fn writable(pubkey: Pubkey) -> Self {
-            Self {
-                pubkey,
-                is_writable: true,
-            }
-        }
-    }
-
-    /// One scheduled instruction template.
-    pub struct ScheduledIx<'a> {
-        pub program_id: Pubkey,
-        pub metas: &'a [SchedMeta],
-        pub data: &'a [u8],
-    }
-
-    /// All the scheduling knobs for `CreateEphemeral`
-    pub struct CreateArgs<'a> {
-        pub seed: [u8; 32],
-        /// All-zeros = unkillable (no cancel authority).
-        pub authority: [u8; 32],
-        pub start_slot: u64,
-        pub interval_slots: u64,
-        /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
-        pub remaining: u64,
-        pub priority_tip: u64,
-        /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
-        /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
-        /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
-        pub cu_limit: u32,
-        /// The scheduled instructions, in execution order. Must be non-empty
-        pub scheduled: &'a [ScheduledIx<'a>],
-    }
-
-    impl CreateArgs<'_> {
-        pub fn body_len(&self) -> usize {
-            self.scheduled
-                .iter()
-                .map(|s| CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
-                .sum()
-        }
-
-        pub fn write_to(&self, data: &mut [u8]) -> usize {
-            let mut off = 0;
-
-            data[off] = ix::CREATE;
-            off += 1;
-
-            data[off..off + 32].copy_from_slice(&self.seed);
-            off += 32;
-
-            data[off..off + 32].copy_from_slice(&self.authority);
-            off += 32;
-
-            data[off..off + 8].copy_from_slice(&self.start_slot.to_le_bytes());
-            off += 8;
-
-            data[off..off + 8].copy_from_slice(&self.interval_slots.to_le_bytes());
-            off += 8;
-
-            data[off..off + 8].copy_from_slice(&self.remaining.to_le_bytes());
-            off += 8;
-
-            data[off..off + 8].copy_from_slice(&self.priority_tip.to_le_bytes());
-            off += 8;
-
-            data[off..off + 4].copy_from_slice(&self.cu_limit.to_le_bytes());
-            off += 4;
-
-            for s in self.scheduled {
-                data[off] = s.metas.len() as u8;
-                off += 1;
-
-                data[off..off + 2].copy_from_slice(&(s.data.len() as u16).to_le_bytes());
-                off += 2;
-
-                data[off..off + 32].copy_from_slice(&s.program_id.to_bytes());
-                off += 32;
-
-                for m in s.metas {
-                    let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
-                    data[off] = flag;
-                    off += 1;
-
-                    data[off..off + 32].copy_from_slice(&m.pubkey.to_bytes());
-                    off += 32;
-                }
-
-                data[off..off + s.data.len()].copy_from_slice(s.data);
-                off += s.data.len();
-            }
-
-            off
-        }
-    }
-
     /// Builders targeting the base-layer Hydra program ([`BASE_PROGRAM_ID`]).
     pub mod base {
+
         use super::*;
 
         /// This module's program ID.
@@ -403,3 +406,5 @@ mod client {
 
 #[cfg(feature = "client")]
 pub use client::*;
+
+use crate::{ix, META_FLAG_WRITABLE};

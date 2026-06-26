@@ -89,7 +89,7 @@ pub fn create_ix(
         priority_tip,
         cu_limit,
         &[ScheduledIx {
-            program_id: sched_program,
+            program_id: sched_program.to_bytes(),
             metas: sched_metas,
             data: sched_data,
         }],
@@ -127,7 +127,7 @@ pub fn create_ix_multi(
     for s in sched {
         data.push(s.metas.len() as u8);
         data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
-        data.extend_from_slice(&s.program_id.to_bytes());
+        data.extend_from_slice(&s.program_id);
         for meta in s.metas {
             let flag: u8 = if meta.is_writable {
                 META_FLAG_WRITABLE
@@ -135,7 +135,7 @@ pub fn create_ix_multi(
                 0
             };
             data.push(flag);
-            data.extend_from_slice(&meta.pubkey.to_bytes());
+            data.extend_from_slice(&meta.pubkey);
         }
         data.extend_from_slice(s.data);
     }
@@ -317,7 +317,7 @@ pub fn print_cu_table() {
     let payer_m = Pubkey::new_unique();
     let multi_specs: Vec<ScheduledIx> = (0..MULTI_N)
         .map(|_| ScheduledIx {
-            program_id: NOOP_ID,
+            program_id: NOOP_ID.to_bytes(),
             metas: &[],
             data: tick,
         })
@@ -514,8 +514,8 @@ mod tests {
                 priority_tip: 1_000,
                 cu_limit,
                 scheduled: &[ScheduledIx {
-                    program_id: memo::ID,
-                    metas: &[SchedMeta::writable(scheduled_meta)],
+                    program_id: memo::ID.to_bytes(),
+                    metas: &[SchedMeta::writable(scheduled_meta.to_bytes())],
                     data: scheduled_data,
                 }],
             },
@@ -572,7 +572,7 @@ mod tests {
             1_000,     // priority_tip
             0,         // cu_limit (0 = omit the ix)
             memo::ID,
-            &[SchedMeta::readonly(recipient)], // one read-only account just for content
+            &[SchedMeta::readonly(recipient.to_bytes())], // one read-only account just for content
             memo_data,
         );
 
@@ -1509,12 +1509,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
-                    metas: &[SchedMeta::writable(acct_a)],
+                    program_id: memo::ID.to_bytes(),
+                    metas: &[SchedMeta::writable(acct_a.to_bytes())],
                     data: b"first",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"second",
                 },
@@ -1577,12 +1577,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1669,12 +1669,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1730,12 +1730,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1785,12 +1785,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1921,7 +1921,7 @@ mod tests {
         // Exactly MAX_INSTRUCTIONS tiny memos -> ok.
         let at_max: Vec<ScheduledIx> = (0..MAX_INSTRUCTIONS)
             .map(|_| ScheduledIx {
-                program_id: memo::ID,
+                program_id: memo::ID.to_bytes(),
                 metas: &[],
                 data: b"m",
             })
@@ -1947,7 +1947,7 @@ mod tests {
         // One past the cap -> rejected.
         let over: Vec<ScheduledIx> = (0..MAX_INSTRUCTIONS + 1)
             .map(|_| ScheduledIx {
-                program_id: memo::ID,
+                program_id: memo::ID.to_bytes(),
                 metas: &[],
                 data: b"m",
             })
@@ -2000,12 +2000,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: NOOP_ID,
-                    metas: &[SchedMeta::writable(writable_acct)],
+                    program_id: NOOP_ID.to_bytes(),
+                    metas: &[SchedMeta::writable(writable_acct.to_bytes())],
                     data: b"one",
                 },
                 ScheduledIx {
-                    program_id: NOOP_ID,
+                    program_id: NOOP_ID.to_bytes(),
                     metas: &[],
                     data: b"two",
                 },
