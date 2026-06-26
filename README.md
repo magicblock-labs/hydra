@@ -352,20 +352,10 @@ let create = ix::create_ephemeral(
 
 ### Build & test
 
-```sh
-# Build the program with the ephemeral instructions.
-cargo build-sbf --manifest-path programs/hydra/Cargo.toml -- --features ephemeral
-
-# End-to-end lifecycle tests run against a local MagicSVM simulator. `tests/ephemeral`
-# is an isolated crate (its own lockfile); see its module docs for the exact steps.
-cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
-cargo test --manifest-path tests/ephemeral/Cargo.toml
-```
-
 #### Live end-to-end test (`tests/e2e`)
 
-`tests/ephemeral` runs in-process against MagicSVM. `tests/e2e` instead boots the
-**real** three-process stack — `mb-test-validator` (base L1), `ephemeral-validator` (the rollup), and `hydra-cranker` — creates a few ephemeral cranks, and
+`tests/e2e` instead boots the **real** three-process stack — `mb-test-validator` (base L1),
+`ephemeral-validator` (the rollup), and `hydra-cranker` — creates a few ephemeral cranks, and
 asserts the cranker fires each one on schedule.
 
 The validators ship as an npm package; `mb-test-validator` wraps
