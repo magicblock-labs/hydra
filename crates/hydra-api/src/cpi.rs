@@ -6,7 +6,7 @@
 //!
 //! `Trigger` is not exposed here. It must be sent as a top-level instruction.
 
-mod base {
+pub mod base {
     #[cfg(feature = "cpi-native")]
     pub mod native {
         //! CPI wrappers for `solana-program` / Anchor callers.
@@ -170,7 +170,7 @@ mod base {
     }
 }
 
-mod ephemeral {
+pub mod ephemeral {
     #[cfg(feature = "cpi-native")]
     pub mod native {
         //! CPI wrappers for `solana-program` / Anchor callers.
