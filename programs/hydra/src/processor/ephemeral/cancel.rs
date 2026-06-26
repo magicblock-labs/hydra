@@ -16,7 +16,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    require_cancel_authority(authority, crank_ai)?;
+    require_cancel_authority(authority, crank_ai, &hydra_api::ephemeral::ID)?;
     check_magic_accounts(vault, magic_program)?;
 
     // The ephemeral account need not sign on close; `authority` is the sponsor

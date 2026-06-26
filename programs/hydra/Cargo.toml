@@ -28,7 +28,7 @@ create-account-allow-prefund = []
 # Ephemeral-rollup crank instructions: schedule/run cranks that live as
 # MagicBlock ephemeral accounts on the ephemeral rollup. Pulls in the
 # `ephemeral-rollups-pinocchio` CPI helpers.
-ephemeral = ["dep:ephemeral-rollups-pinocchio", "hydra-api/ephemeral"]
+ephemeral = ["dep:ephemeral-rollups-pinocchio"]
 
 [dependencies]
 pinocchio = { workspace = true }

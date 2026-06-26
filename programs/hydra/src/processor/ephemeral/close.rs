@@ -21,7 +21,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    require_signed_crank(reporter, crank_ai)?;
+    require_signed_crank(reporter, crank_ai, &hydra_api::ephemeral::ID)?;
     check_magic_accounts(vault, magic_program)?;
 
     let (stored_authority, remaining, next_exec_slot) = {

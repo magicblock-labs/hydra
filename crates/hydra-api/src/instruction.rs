@@ -66,8 +66,12 @@ mod client {
     pub const EPHEMERAL_PROGRAM_ID: Pubkey = pubkey!("eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf");
 
     /// Hydra program ID as a `solana_pubkey::Pubkey` (convenience for clients).
-    pub fn program_id() -> Pubkey {
-        Pubkey::new_from_array(crate::ID.to_bytes())
+    pub fn base_program_id() -> Pubkey {
+        Pubkey::new_from_array(crate::base::ID.to_bytes())
+    }
+
+    pub fn ephemeral_program_id() -> Pubkey {
+        Pubkey::new_from_array(crate::ephemeral::ID.to_bytes())
     }
 
     /// A scheduled-ix meta as it will be stored on-chain.
@@ -335,11 +339,6 @@ mod client {
             }
         }
     }
-
-    #[cfg(not(feature = "ephemeral"))]
-    pub use base::*;
-    #[cfg(feature = "ephemeral")]
-    pub use ephemeral::*;
 
     /// Reconstruct all scheduled instructions from a crank's raw account bytes.
     /// This is what an off-chain cranker does to build the sibling ixs that

@@ -40,7 +40,7 @@ pub const NOOP_ID: Pubkey = pubkey!("4sdZFwGE7TkQCJVpfggvfy2ZwGNCfF6hAMJYjZU5HpZ
 pub const NOOP_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/hydra_noop");
 
 pub fn hydra_id() -> Pubkey {
-    Pubkey::new_from_array(hydra_api::ID.to_bytes())
+    Pubkey::new_from_array(hydra_api::base::ID.to_bytes())
 }
 
 pub fn mollusk_with_hydra() -> Mollusk {
@@ -57,7 +57,7 @@ pub fn load_noop(mollusk: &mut Mollusk) {
 }
 
 pub fn find_crank(seed: &[u8; 32]) -> (Pubkey, u8) {
-    let (addr, bump) = hydra_api::state::find_crank_pda(seed);
+    let (addr, bump) = hydra_api::state::find_base_crank_pda(seed);
     (Pubkey::new_from_array(addr.to_bytes()), bump)
 }
 
@@ -502,7 +502,7 @@ mod tests {
         let scheduled_data: &[u8] = b"tick";
         let cu_limit: u32 = 321_000;
 
-        let ix = hydra_api::instruction::create(
+        let ix = hydra_api::instruction::base::create(
             payer,
             crank_pda,
             &CreateArgs {

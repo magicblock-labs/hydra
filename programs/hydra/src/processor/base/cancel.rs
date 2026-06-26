@@ -10,6 +10,6 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    require_cancel_authority(authority, crank_ai)?;
+    require_cancel_authority(authority, crank_ai, &hydra_api::base::ID)?;
     drain_lamports(crank_ai, recipient)
 }

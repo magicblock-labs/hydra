@@ -46,7 +46,7 @@ pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     // Size the account from the scheduled ixs (validates the schedule), verify
     // the PDA, then allocate at exactly that size. The tail is written below.
     let region_len = measure_region(data)?;
-    let bump = derive_crank_pda(crank_ai, &header.seed)?;
+    let bump = derive_crank_pda(crank_ai, &header.seed, &hydra_api::base::ID)?;
     let total_size = CRANK_HEADER_SIZE + region_len;
 
     // One sysvar read serves both CreateAccount funding and the cached floor.
@@ -71,7 +71,7 @@ pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         CreateAccountAllowPrefund {
             to: crank_ai,
             space: total_size as u64,
-            owner: &hydra_api::ID,
+            owner: &hydra_api::base::ID,
             funding: (funding_lamports > 0).then_some(Funding {
                 from: payer,
                 lamports: funding_lamports,
@@ -101,7 +101,7 @@ pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         .invoke_signed(&signers)?;
         Assign {
             account: crank_ai,
-            owner: &hydra_api::ID,
+            owner: &hydra_api::base::ID,
         }
         .invoke_signed(&signers)?;
     }

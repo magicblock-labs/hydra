@@ -6,4 +6,4 @@ mod entrypoint;
 mod helpers;
 mod processor;
 
-pub use hydra_api::ID;
+pub use hydra_api::{base::ID as BASE_ID, ephemeral::ID as EPHEMERAL_ID};

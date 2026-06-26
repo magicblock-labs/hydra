@@ -14,11 +14,15 @@ use hydra_api::{
 
 /// `signer` must sign and `crank` must be Hydra-owned — the preamble of every
 /// `Cancel` / `Close` path.
-pub(super) fn require_signed_crank(signer: &AccountView, crank_ai: &AccountView) -> ProgramResult {
+pub(super) fn require_signed_crank(
+    signer: &AccountView,
+    crank_ai: &AccountView,
+    program_id: &Address,
+) -> ProgramResult {
     if !signer.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::ID) {
+    if !crank_ai.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     Ok(())
@@ -42,8 +46,9 @@ pub(super) fn require_refund_recipient(
 pub(super) fn require_cancel_authority(
     authority: &AccountView,
     crank_ai: &AccountView,
+    program_id: &Address,
 ) -> ProgramResult {
-    require_signed_crank(authority, crank_ai)?;
+    require_signed_crank(authority, crank_ai, program_id)?;
     let stored = {
         let data = crank_ai.try_borrow()?;
         unsafe { load_crank(&data)? }.authority
@@ -161,9 +166,10 @@ pub(super) fn measure_region(data: &[u8]) -> Result<usize, ProgramError> {
 pub(super) fn derive_crank_pda(
     crank_ai: &AccountView,
     seed: &[u8; 32],
+    program_id: &Address,
 ) -> Result<u8, ProgramError> {
     let (expected_pda, bump) =
-        Address::find_program_address(&[CRANK_SEED_PREFIX, seed], &hydra_api::ID);
+        Address::find_program_address(&[CRANK_SEED_PREFIX, seed], program_id);
     if crank_ai.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }

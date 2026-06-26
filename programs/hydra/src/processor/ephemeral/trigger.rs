@@ -29,7 +29,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     if !cranker_ai.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::ID) {
+    if !crank_ai.owned_by(&hydra_api::ephemeral::ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     if ix_sysvar_ai.address() != &INSTRUCTIONS_ID {

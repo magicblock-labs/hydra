@@ -20,7 +20,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    require_signed_crank(reporter, crank_ai)?;
+    require_signed_crank(reporter, crank_ai, &hydra_api::base::ID)?;
 
     // Snapshot fields we need from the crank header.
     let (stored_authority, remaining, rent_min, priority_tip, next_exec_slot, lamports_now) = {
