@@ -60,5 +60,6 @@ pub fn process_instruction(
                 data: b"tick",
             }],
         },
+        &[],
     )
 }

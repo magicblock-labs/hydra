@@ -5,15 +5,13 @@
 #![no_std]
 
 use pinocchio::{
-    cpi::invoke,
-    error::ProgramError,
-    instruction::{InstructionAccount, InstructionView},
-    no_allocator, nostd_panic_handler, program_entrypoint, AccountView, Address, ProgramResult,
+    error::ProgramError, no_allocator, nostd_panic_handler, program_entrypoint, AccountView,
+    Address, ProgramResult,
 };
 
 use hydra_api::{
-    consts::{ix as disc, MAX_ACCOUNTS, MAX_DATA_LEN},
-    instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN},
+    consts::{MAX_ACCOUNTS, MAX_DATA_LEN},
+    instruction::{CreateArgs, ScheduledIx, CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN},
 };
 
 program_entrypoint!(process);
@@ -43,7 +41,9 @@ fn schedule(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     if data.len() < 66 {
         return Err(ProgramError::InvalidInstructionData);
     }
-    let seed = &data[0..32];
+    let seed: [u8; 32] = data[0..32]
+        .try_into()
+        .map_err(|_| ProgramError::InvalidInstructionData)?;
     let target_program_id = &data[32..64];
     let tick_len = u16::from_le_bytes([data[64], data[65]]) as usize;
     if data.len() < 66 + tick_len || tick_len > MAX_DATA_LEN {
@@ -51,48 +51,31 @@ fn schedule(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     }
     let tick_data = &data[66..66 + tick_len];
 
-    let [payer, crank, system_program, hydra_program, ..] = accounts else {
+    let [payer, crank, system_program, _hydra_program, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
     // Build Hydra Create data on the stack.
-    let mut buf = [0u8; CREATE_BUF_MAX];
-    let mut cursor = 0usize;
-    buf[cursor] = disc::CREATE;
-    cursor += 1;
-    buf[cursor..cursor + 32].copy_from_slice(seed);
-    cursor += 32;
-    buf[cursor..cursor + 32].copy_from_slice(&[0u8; 32]); // no cancel authority
-    cursor += 32;
-    buf[cursor..cursor + 8].copy_from_slice(&0u64.to_le_bytes()); // start_slot
-    cursor += 8;
-    buf[cursor..cursor + 8].copy_from_slice(&400u64.to_le_bytes()); // interval_slots
-    cursor += 8;
-    buf[cursor..cursor + 8].copy_from_slice(&10u64.to_le_bytes()); // remaining
-    cursor += 8;
-    buf[cursor..cursor + 8].copy_from_slice(&1_000u64.to_le_bytes()); // priority_tip
-    cursor += 8;
-    buf[cursor..cursor + 4].copy_from_slice(&0u32.to_le_bytes()); // cu_limit (omit)
-    cursor += 4;
-    buf[cursor] = 0; // num_accounts (single scheduled ix; parsed until data ends)
-    cursor += 1;
-    buf[cursor..cursor + 2].copy_from_slice(&(tick_len as u16).to_le_bytes());
-    cursor += 2;
-    buf[cursor..cursor + 32].copy_from_slice(target_program_id);
-    cursor += 32;
-    // No metas.
-    buf[cursor..cursor + tick_len].copy_from_slice(tick_data);
-    cursor += tick_len;
-
-    let metas = [
-        InstructionAccount::writable_signer(payer.address()),
-        InstructionAccount::writable(crank.address()),
-        InstructionAccount::readonly(system_program.address()),
-    ];
-    let ix = InstructionView {
-        program_id: hydra_program.address(),
-        accounts: &metas,
-        data: &buf[..cursor],
-    };
-    invoke(&ix, &[payer, crank, system_program])
+    hydra_api::cpi::pinocchio::create::<CREATE_BUF_MAX>(
+        payer,
+        crank,
+        system_program,
+        &CreateArgs {
+            seed,
+            authority: [0u8; 32],
+            start_slot: 0,
+            interval_slots: 400,
+            remaining: 10,
+            priority_tip: 1_000,
+            cu_limit: 0,
+            scheduled: &[ScheduledIx {
+                program_id: target_program_id
+                    .try_into()
+                    .map_err(|_| ProgramError::InvalidInstructionData)?,
+                metas: &[],
+                data: tick_data,
+            }],
+        },
+        &[],
+    )
 }

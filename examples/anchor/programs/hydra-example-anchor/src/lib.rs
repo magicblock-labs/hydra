@@ -42,6 +42,7 @@ pub mod hydra_example_anchor {
                     data: b"tick",
                 }],
             },
+            &[],
         )
         .map_err(Into::into)
     }

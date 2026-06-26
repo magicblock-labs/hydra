@@ -59,8 +59,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::RecvTimeoutError;
-use hydra_api::instruction::ephemeral::{self as eph, CreateArgs};
 use hydra_api::instruction::{self as ix, ScheduledIx};
+use hydra_api::instruction::{
+    ephemeral::{self as eph},
+    CreateArgs,
+};
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::{AccountMeta, Instruction};
@@ -360,8 +363,9 @@ fn create_cranks(sponsor: &Keypair, fee_payer: &Keypair, noop_id: Pubkey) -> Res
             handles.push(scope.spawn(move || {
                 let rpc = RpcClient::new_with_commitment(rpc_url, commitment);
                 let crank = create_crank(&rpc, sponsor, fee_payer, crank_seed(i), noop_id, i)?;
-                assert_crank_exists(&rpc, &crank)
-                    .with_context(|| format!("crank {i} ({crank}) was not created on the rollup"))?;
+                assert_crank_exists(&rpc, &crank).with_context(|| {
+                    format!("crank {i} ({crank}) was not created on the rollup")
+                })?;
                 Ok((i, crank))
             }));
         }
@@ -527,7 +531,7 @@ fn create_crank(
         &CreateArgs {
             seed,
             authority: [0u8; 32], // no cancel authority → permissionless, runs forever
-            start_slots: 0,
+            start_slot: 0,
             interval_slots: INTERVAL_SLOTS,
             remaining: TARGET_EXECUTIONS,
             priority_tip: 0,

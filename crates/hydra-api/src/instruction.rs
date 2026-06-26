@@ -103,6 +103,86 @@ mod client {
         pub data: &'a [u8],
     }
 
+    /// All the scheduling knobs for `CreateEphemeral`
+    pub struct CreateArgs<'a> {
+        pub seed: [u8; 32],
+        /// All-zeros = unkillable (no cancel authority).
+        pub authority: [u8; 32],
+        pub start_slot: u64,
+        pub interval_slots: u64,
+        /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
+        pub remaining: u64,
+        pub priority_tip: u64,
+        /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
+        /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
+        /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
+        pub cu_limit: u32,
+        /// The scheduled instructions, in execution order. Must be non-empty
+        pub scheduled: &'a [ScheduledIx<'a>],
+    }
+
+    impl CreateArgs<'_> {
+        pub fn body_len(&self) -> usize {
+            self.scheduled
+                .iter()
+                .map(|s| CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
+                .sum()
+        }
+
+        pub fn write_to(&self, data: &mut [u8]) -> usize {
+            let mut off = 0;
+
+            data[off] = ix::CREATE;
+            off += 1;
+
+            data[off..off + 32].copy_from_slice(&self.seed);
+            off += 32;
+
+            data[off..off + 32].copy_from_slice(&self.authority);
+            off += 32;
+
+            data[off..off + 8].copy_from_slice(&self.start_slot.to_le_bytes());
+            off += 8;
+
+            data[off..off + 8].copy_from_slice(&self.interval_slots.to_le_bytes());
+            off += 8;
+
+            data[off..off + 8].copy_from_slice(&self.remaining.to_le_bytes());
+            off += 8;
+
+            data[off..off + 8].copy_from_slice(&self.priority_tip.to_le_bytes());
+            off += 8;
+
+            data[off..off + 4].copy_from_slice(&self.cu_limit.to_le_bytes());
+            off += 4;
+
+            for s in self.scheduled {
+                data[off] = s.metas.len() as u8;
+                off += 1;
+
+                data[off..off + 2].copy_from_slice(&(s.data.len() as u16).to_le_bytes());
+                off += 2;
+
+                data[off..off + 32].copy_from_slice(&s.program_id.to_bytes());
+                off += 32;
+
+                for m in s.metas {
+                    let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
+                    data[off] = flag;
+                    off += 1;
+
+                    data[off..off + 32].copy_from_slice(&m.pubkey.to_bytes());
+                    off += 32;
+                }
+
+                data[off..off + s.data.len()].copy_from_slice(s.data);
+                off += s.data.len();
+            }
+
+            off
+        }
+    }
+
     /// Builders targeting the base-layer Hydra program ([`BASE_PROGRAM_ID`]).
     pub mod base {
         use super::*;
@@ -115,24 +195,6 @@ mod client {
             Pubkey::find_program_address(&[crate::consts::CRANK_SEED_PREFIX, seed], &PROGRAM_ID)
         }
 
-        /// All the scheduling knobs for `Create`
-        pub struct CreateArgs<'a> {
-            pub seed: [u8; 32],
-            /// All-zeros = unkillable (no cancel authority).
-            pub authority: [u8; 32],
-            pub start_slot: u64,
-            pub interval_slots: u64,
-            /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
-            pub remaining: u64,
-            pub priority_tip: u64,
-            /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
-            /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
-            /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
-            pub cu_limit: u32,
-            /// The scheduled instructions, in execution order. Must be non-empty
-            pub scheduled: &'a [ScheduledIx<'a>],
-        }
-
         /// Build a `Create` instruction scheduling a single instruction.
         pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
             let body_len: usize = args
@@ -140,26 +202,8 @@ mod client {
                 .iter()
                 .map(|s| CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
                 .sum();
-            let mut data = Vec::with_capacity(1 + CREATE_FIXED_PREFIX_LEN + body_len);
-            data.push(ix::CREATE);
-            data.extend_from_slice(&args.seed);
-            data.extend_from_slice(&args.authority);
-            data.extend_from_slice(&args.start_slot.to_le_bytes());
-            data.extend_from_slice(&args.interval_slots.to_le_bytes());
-            data.extend_from_slice(&args.remaining.to_le_bytes());
-            data.extend_from_slice(&args.priority_tip.to_le_bytes());
-            data.extend_from_slice(&args.cu_limit.to_le_bytes());
-            for s in args.scheduled {
-                data.push(s.metas.len() as u8);
-                data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
-                data.extend_from_slice(&s.program_id.to_bytes());
-                for m in s.metas {
-                    let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
-                    data.push(flag);
-                    data.extend_from_slice(&m.pubkey.to_bytes());
-                }
-                data.extend_from_slice(s.data);
-            }
+            let mut data = vec![0_u8; 1 + CREATE_FIXED_PREFIX_LEN + body_len];
+            args.write_to(&mut data);
 
             Instruction {
                 program_id: PROGRAM_ID,
@@ -228,24 +272,6 @@ mod client {
             Pubkey::find_program_address(&[crate::consts::CRANK_SEED_PREFIX, seed], &PROGRAM_ID)
         }
 
-        /// All the scheduling knobs for `CreateEphemeral`
-        pub struct CreateArgs<'a> {
-            pub seed: [u8; 32],
-            /// All-zeros = unkillable (no cancel authority).
-            pub authority: [u8; 32],
-            pub start_slots: u64,
-            pub interval_slots: u64,
-            /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
-            pub remaining: u64,
-            pub priority_tip: u64,
-            /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
-            /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
-            /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
-            pub cu_limit: u32,
-            /// The scheduled instructions, in execution order. Must be non-empty
-            pub scheduled: &'a [ScheduledIx<'a>],
-        }
-
         /// Build a `Create` instruction
         pub fn create(sponsor: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
             let body_len: usize = args
@@ -253,26 +279,9 @@ mod client {
                 .iter()
                 .map(|s| super::CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
                 .sum();
-            let mut data = Vec::with_capacity(1 + super::CREATE_FIXED_PREFIX_LEN + body_len);
-            data.push(ix::CREATE);
-            data.extend_from_slice(&args.seed);
-            data.extend_from_slice(&args.authority);
-            data.extend_from_slice(&args.start_slots.to_le_bytes());
-            data.extend_from_slice(&args.interval_slots.to_le_bytes());
-            data.extend_from_slice(&args.remaining.to_le_bytes());
-            data.extend_from_slice(&args.priority_tip.to_le_bytes());
-            data.extend_from_slice(&args.cu_limit.to_le_bytes());
-            for s in args.scheduled {
-                data.push(s.metas.len() as u8);
-                data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
-                data.extend_from_slice(&s.program_id.to_bytes());
-                for m in s.metas {
-                    let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
-                    data.push(flag);
-                    data.extend_from_slice(&m.pubkey.to_bytes());
-                }
-                data.extend_from_slice(s.data);
-            }
+            let mut data = vec![0_u8; 1 + super::CREATE_FIXED_PREFIX_LEN + body_len];
+            args.write_to(&mut data);
+
             Instruction {
                 program_id: PROGRAM_ID,
                 accounts: alloc::vec![
