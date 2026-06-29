@@ -30,7 +30,7 @@ pinocchio-log = "0.5"
 # instructions). Tracks pinocchio 0.10, which is why the program is pinned to
 # 0.10 rather than 0.11.
 ephemeral-rollups-pinocchio = "0.15"
-solana-address = { version = "2.6", features = ["decode", "curve25519"] }
+solana-address = { version = "2", features = ["decode", "curve25519"] }
 solana-define-syscall = "5.0"
 hydra-api = { path = "crates/hydra-api" }
 
