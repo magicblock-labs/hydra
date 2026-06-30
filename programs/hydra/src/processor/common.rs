@@ -1,22 +1,8 @@
-//! Shared helpers for the base-layer crank processors.
+//! Raw-pointer field helpers for the base-layer `Trigger` hot path. The lamport
+//! drain + close/cancel payout logic is shared with the ephemeral program via
+//! [`hydra_api::program::processor`].
 
-use pinocchio::{error::ProgramError, AccountView, ProgramResult};
-
-/// Move all lamports out of `src` into `dst`. The runtime zeroes `src.data`
-/// and reassigns ownership to the system program at the instruction boundary
-/// because `src.lamports == 0` post-write.
-#[inline(always)]
-pub(super) fn drain_lamports(src: &AccountView, dst: &AccountView) -> ProgramResult {
-    let amount = src.lamports();
-    let new_dst = dst
-        .lamports()
-        .checked_add(amount)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    src.set_lamports(0);
-    dst.set_lamports(new_dst);
-    Ok(())
-}
-
+/// Read/write the 8-byte header fields the `Trigger` hot path touches directly.
 #[inline(always)]
 pub(super) unsafe fn read_u64(p: *const u8) -> u64 {
     core::ptr::read_unaligned(p as *const u64)

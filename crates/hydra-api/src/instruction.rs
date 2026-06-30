@@ -314,13 +314,15 @@ mod client {
             }
         }
 
-        /// Build a `Cancel` instruction
-        pub fn cancel(authority: Pubkey, crank: Pubkey) -> Instruction {
+        /// Build a `Cancel` instruction. `recipient` receives the crank's drained
+        /// lamport balance; the vault rent refunds to `authority`.
+        pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
             Instruction {
                 program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(authority, true),
                     AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
                     AccountMeta::new(EPHEMERAL_VAULT_ID, false),
                     AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
                 ],
@@ -328,13 +330,15 @@ mod client {
             }
         }
 
-        /// Build a `Close` instruction
-        pub fn close(reporter: Pubkey, crank: Pubkey) -> Instruction {
+        /// Build a `Close` instruction. `reporter` keeps the flat bounty (and the
+        /// vault rent refund); `recipient` receives the remaining balance.
+        pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
             Instruction {
                 program_id: PROGRAM_ID,
                 accounts: alloc::vec![
                     AccountMeta::new(reporter, true),
                     AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
                     AccountMeta::new(EPHEMERAL_VAULT_ID, false),
                     AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
                 ],

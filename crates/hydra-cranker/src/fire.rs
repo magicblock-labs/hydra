@@ -168,14 +168,16 @@ pub fn fire_close(
     entry: &CrankEntry,
     priority_fee_micro_lamports: u64,
 ) -> Result<()> {
-    let close = if crate::mode::is_ephemeral() {
-        ix::ephemeral::close(cranker.pubkey(), entry.pubkey)
+    // Refund recipient: the authority if set (anti-grief binds it on-chain),
+    // otherwise the cranker itself.
+    let recipient = if entry.authority == [0u8; 32] {
+        cranker.pubkey()
     } else {
-        let recipient = if entry.authority == [0u8; 32] {
-            cranker.pubkey()
-        } else {
-            Pubkey::new_from_array(entry.authority)
-        };
+        Pubkey::new_from_array(entry.authority)
+    };
+    let close = if crate::mode::is_ephemeral() {
+        ix::ephemeral::close(cranker.pubkey(), entry.pubkey, recipient)
+    } else {
         ix::base::close(cranker.pubkey(), entry.pubkey, recipient)
     };
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {

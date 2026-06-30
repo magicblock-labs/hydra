@@ -26,6 +26,10 @@ use hydra_api::{
 /// Absolute path to the built `.so` (without extension) — mollusk appends `.so`.
 pub const HYDRA_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/hydra");
 
+/// Absolute path to the built ephemeral `.so` (without extension).
+pub const HYDRA_EPHEMERAL_SO: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/hydra_ephemeral");
+
 // ---------------------------------------------------------------------------
 // Helpers (pub so the bench file `benches/compute_units.rs` can reuse them)
 // ---------------------------------------------------------------------------
@@ -46,6 +50,16 @@ pub fn hydra_id() -> Pubkey {
 pub fn mollusk_with_hydra() -> Mollusk {
     let id = hydra_id();
     let mut mollusk = Mollusk::new(&id, HYDRA_SO);
+    memo::add_program(&mut mollusk);
+    mollusk
+}
+
+pub fn eph_id() -> Pubkey {
+    Pubkey::new_from_array(hydra_api::ephemeral::ID.to_bytes())
+}
+
+pub fn mollusk_with_hydra_ephemeral() -> Mollusk {
+    let mut mollusk = Mollusk::new(&eph_id(), HYDRA_EPHEMERAL_SO);
     memo::add_program(&mut mollusk);
     mollusk
 }
@@ -719,6 +733,95 @@ mod tests {
         );
 
         let header = decode_header(&crank_acct.data);
+        assert_eq!(header.executed(), 1, "executed++");
+        assert_eq!(header.remaining(), 9, "remaining--");
+        assert_eq!(header.next_exec_slot(), 100, "slot advanced by interval");
+    }
+
+    /// The ephemeral `Trigger` must pay the cranker exactly like the base one.
+    /// Ephemeral `Create` CPIs the Magic program (unavailable in mollusk), so we
+    /// mint a valid crank via the base program — the `Crank` layout + region are
+    /// identical — then re-own it to the ephemeral program and trigger it.
+    #[test]
+    fn ephemeral_trigger_pays_cranker() {
+        let base = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let memo_data: &[u8] = b"tick";
+        let priority_tip: u64 = 2_500;
+
+        let create = create_ix(
+            payer, crank_pda, SEED, [0u8; 32], 0, 100, 10, priority_tip, 0, memo::ID, &[],
+            memo_data,
+        );
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let create_accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (memo_id, memo_acct.clone()),
+            (system_program, system_program_acct.clone()),
+        ];
+        let after_create = base.process_transaction_instructions(&[create], &create_accounts);
+        assert!(
+            after_create.raw_result.is_ok(),
+            "base create failed: {:?}",
+            after_create.raw_result
+        );
+
+        // Re-own the freshly-minted crank to the ephemeral program and fund it
+        // as the cranker-reward budget (a sponsor would do this with a transfer).
+        let mut crank_acct = after_create
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a.clone())
+            .expect("crank after create");
+        crank_acct.owner = eph_id();
+        crank_acct.lamports += 1_000_000;
+
+        let eph = mollusk_with_hydra_ephemeral();
+        let cranker_starting: u64 = 0;
+        let trigger = hydra_api::instruction::ephemeral::trigger(crank_pda, cranker);
+        let scheduled = Instruction {
+            program_id: memo::ID,
+            accounts: vec![],
+            data: memo_data.to_vec(),
+        };
+        let trigger_accounts = vec![
+            (crank_pda, crank_acct),
+            (cranker, Account::new(cranker_starting, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+
+        let after = eph.process_transaction_instructions(&[trigger, scheduled], &trigger_accounts);
+        assert!(
+            after.raw_result.is_ok(),
+            "ephemeral trigger failed: {:?}",
+            after.raw_result
+        );
+
+        let cranker_acct = after
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &cranker)
+            .map(|(_, a)| a)
+            .expect("cranker after trigger");
+        assert_eq!(
+            cranker_acct.lamports,
+            cranker_starting + CRANKER_REWARD + priority_tip,
+            "ephemeral cranker reward"
+        );
+
+        let crank_after = after
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank after trigger");
+        let header = decode_header(&crank_after.data);
         assert_eq!(header.executed(), 1, "executed++");
         assert_eq!(header.remaining(), 9, "remaining--");
         assert_eq!(header.next_exec_slot(), 100, "slot advanced by interval");

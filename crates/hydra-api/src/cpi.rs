@@ -218,12 +218,20 @@ pub mod ephemeral {
             authority: &AccountInfo<'a>,
             crank: &AccountInfo<'a>,
             recipient: &AccountInfo<'a>,
+            vault: &AccountInfo<'a>,
+            magic_program: &AccountInfo<'a>,
             signer_seeds: &[&[&[u8]]],
         ) -> Result<(), ProgramError> {
-            let ix = builder::cancel(*authority.key, *crank.key);
+            let ix = builder::cancel(*authority.key, *crank.key, *recipient.key);
             invoke_signed(
                 &ix,
-                &[authority.clone(), crank.clone(), recipient.clone()],
+                &[
+                    authority.clone(),
+                    crank.clone(),
+                    recipient.clone(),
+                    vault.clone(),
+                    magic_program.clone(),
+                ],
                 signer_seeds,
             )
         }
@@ -235,12 +243,20 @@ pub mod ephemeral {
             reporter: &AccountInfo<'a>,
             crank: &AccountInfo<'a>,
             recipient: &AccountInfo<'a>,
+            vault: &AccountInfo<'a>,
+            magic_program: &AccountInfo<'a>,
             signer_seeds: &[&[&[u8]]],
         ) -> Result<(), ProgramError> {
-            let ix = builder::close(*reporter.key, *crank.key);
+            let ix = builder::close(*reporter.key, *crank.key, *recipient.key);
             invoke_signed(
                 &ix,
-                &[reporter.clone(), crank.clone(), recipient.clone()],
+                &[
+                    reporter.clone(),
+                    crank.clone(),
+                    recipient.clone(),
+                    vault.clone(),
+                    magic_program.clone(),
+                ],
                 signer_seeds,
             )
         }

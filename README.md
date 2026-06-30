@@ -312,27 +312,31 @@ base-layer `hydra` program neither contains this code nor depends on
 `ephemeral-rollups-pinocchio`; the two programs share their schedule/verify
 logic through [`hydra_api::program`].
 
-The model is the same as the base crank — a crank stores scheduled instructions,
-anyone triggers them when due, and `Trigger` verifies the follow-up siblings with
-the same single `memcmp` — with two differences the ER forces:
+The economic model is identical to the base crank — the cranker is paid
+`CRANKER_REWARD + priority_tip` out of the crank's lamport balance on `Trigger`,
+and `Cancel`/`Close` pay out the leftover balance — with two differences the ER
+forces:
 
-- **Ephemeral accounts hold zero lamports.** Rent (a flat per-byte fee) is paid by
-  a sponsor into a shared vault, not held in the account. So there is no cranker
-  reward, no priority-tip payout, and no rent floor: the ephemeral `Trigger` only
-  verifies the follow-up ix and advances the schedule (slot check, decrement
-  `remaining`, bump `executed`).
-- **Creation is a single instruction.** The Magic program materializes the
-  ephemeral account synchronously, so `Create` allocates the crank (via a
-  Magic CPI signed by the crank PDA) and writes its header + scheduled-ix tail in
-  one instruction — no separate init step.
+- **Vault rent is separate from the crank balance.** The ephemeral account's rent
+  (a flat per-byte fee) is paid by a sponsor into a shared vault, not held in the
+  account, so the crank's stored `rent_min` is `0`. The crank still holds a plain
+  lamport balance (funded by the sponsor) that funds the cranker rewards, exactly
+  like base; the only `Trigger` floor is being able to afford the reward.
+- **Creation/teardown go through the Magic program.** The Magic program
+  materializes the ephemeral account synchronously, so `Create` allocates the
+  crank (via a Magic CPI signed by the crank PDA) and writes its header +
+  scheduled-ix tail in one instruction. `Cancel`/`Close` first drain the crank's
+  leftover lamports to a `recipient` (the same bounty/refund split as base), then
+  CPI Magic `close` to deallocate the account and refund the vault rent to the
+  sponsor.
 
-Lifecycle: `Create` → `Trigger` (+ scheduled siblings, run
-top-level on the ER) → `Cancel` (authority-gated) / `Close`
-(permissionless, when the crank is exhausted or stuck). `Cancel`/`Close` CPI the
-Magic program to close the ephemeral account and refund the vault rent to the
-sponsor; if a non-zero `authority` is set, only that authority may close it. The
-crank PDA derivation (`[b"crank", seed]`) and the on-chain `Crank` layout are
-unchanged, so the template / verification model is identical.
+Lifecycle: `Create` → `Trigger` (+ scheduled siblings, run top-level on the ER) →
+`Cancel` (authority-gated) / `Close` (permissionless, when the crank is exhausted,
+underfunded, or stuck). On teardown the leftover balance refunds to `recipient`
+and the vault rent refunds to the sponsor (`authority` on `Cancel`, `reporter` on
+`Close`); if a non-zero `authority` is set, only that authority may be the
+`recipient`. The crank PDA derivation (`[b"crank", seed]`) and the on-chain
+`Crank` layout are unchanged, so the template / verification model is identical.
 
 ### Instruction Reference (ephemeral)
 
@@ -340,12 +344,12 @@ Same discriminators as the base program (`0–3`); the account shapes differ
 because creation/close go through the Magic program rather than the System
 program.
 
-| Disc | Name      | Accounts                                            | Data             |
-| ---: | --------- | --------------------------------------------------- | ---------------- |
-|    0 | `Create`  | `sponsor(w,s), crank(w), vault(w), magic_program`   | schedule payload |
-|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar`       | none             |
-|    2 | `Cancel`  | `authority(w,s), crank(w), vault(w), magic_program` | none             |
-|    3 | `Close`   | `reporter(w,s), crank(w), vault(w), magic_program`  | none             |
+| Disc | Name      | Accounts                                                         | Data             |
+| ---: | --------- | ---------------------------------------------------------------- | ---------------- |
+|    0 | `Create`  | `sponsor(w,s), crank(w), vault(w), magic_program`                | schedule payload |
+|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar`                    | none             |
+|    2 | `Cancel`  | `authority(w,s), crank(w), recipient(w), vault(w), magic_program` | none             |
+|    3 | `Close`   | `reporter(w,s), crank(w), recipient(w), vault(w), magic_program`  | none             |
 
 `vault` is the ephemeral rent vault and `magic_program` is MagicBlock's Magic
 program; `hydra-api` exposes both as `consts::magic::EPHEMERAL_VAULT_ID` /

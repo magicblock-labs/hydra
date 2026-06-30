@@ -8,10 +8,12 @@ use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
 use crate::{
     consts::{
-        CRANK_SEED_PREFIX, MAX_ACCOUNTS, MAX_COMPUTE_UNIT_LIMIT, MAX_DATA_LEN, MAX_INSTRUCTIONS,
-        META_FLAG_SIGNER, REMAINING_INFINITE, SERIALIZED_META_SIZE,
+        CRANKER_REWARD, CRANK_SEED_PREFIX, MAX_ACCOUNTS, MAX_COMPUTE_UNIT_LIMIT, MAX_DATA_LEN,
+        MAX_INSTRUCTIONS, META_FLAG_SIGNER, REMAINING_INFINITE, SERIALIZED_META_SIZE,
+        STALENESS_THRESHOLD_SLOTS,
     },
     instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN},
+    program::helpers::get_clock_slot,
     state::{load_crank, load_crank_mut, Crank},
     HydraError, CRANK_HEADER_SIZE,
 };
@@ -369,4 +371,101 @@ pub fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 #[inline(always)]
 pub unsafe fn read_u16(p: *const u8) -> u16 {
     core::ptr::read_unaligned(p as *const u16)
+}
+
+/// Move all lamports out of `src` into `dst`.
+#[inline(always)]
+pub fn drain_lamports(src: &AccountView, dst: &AccountView) -> ProgramResult {
+    let amount = src.lamports();
+    let new_dst = dst
+        .lamports()
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    src.set_lamports(0);
+    dst.set_lamports(new_dst);
+    Ok(())
+}
+
+/// Shared `Cancel`: authority-gated drain of the crank's full balance to
+/// `recipient`.
+pub fn process_cancel(
+    authority: &AccountView,
+    crank_ai: &AccountView,
+    recipient: &AccountView,
+    program_id: &Address,
+) -> ProgramResult {
+    require_cancel_authority(authority, crank_ai, program_id)?;
+    drain_lamports(crank_ai, recipient)
+}
+
+/// Shared `Close`: permissionless cleanup of an exhausted / underfunded / stuck
+/// crank. Pays a flat `CRANKER_REWARD` bounty to `reporter`, refunds the
+/// remaining balance to `recipient` (anti-grief: bound to the stored authority
+/// when set), and zeroes the crank.
+pub fn process_close(
+    reporter: &AccountView,
+    crank_ai: &AccountView,
+    recipient: &AccountView,
+    program_id: &Address,
+) -> ProgramResult {
+    require_signed_crank(reporter, crank_ai, program_id)?;
+
+    // Snapshot the fields we need from the crank header.
+    let (stored_authority, remaining, rent_min, priority_tip, next_exec_slot, lamports_now) = {
+        let data = crank_ai.try_borrow()?;
+        let state = unsafe { load_crank(&data)? };
+        (
+            state.authority,
+            state.remaining(),
+            state.rent_min(),
+            state.priority_tip(),
+            state.next_exec_slot(),
+            crank_ai.lamports(),
+        )
+    };
+
+    // Pre-condition: exhausted OR underfunded OR stuck.
+    let exhausted = remaining == 0;
+    let next_reward = CRANKER_REWARD
+        .checked_add(priority_tip)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let underfunded = lamports_now
+        < rent_min
+            .checked_add(next_reward)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+    // `next_exec_slot` only advances on *successful* `Trigger`, so persistent
+    // failure pins it in the past. `saturating_sub` makes future-scheduled
+    // cranks (`next_exec_slot > current_slot`) trivially not-stale.
+    let current_slot = get_clock_slot()?;
+    let stuck = current_slot.saturating_sub(next_exec_slot) > STALENESS_THRESHOLD_SLOTS;
+
+    if !(exhausted || underfunded || stuck) {
+        return Err(HydraError::NotClosable.into());
+    }
+
+    require_refund_recipient(stored_authority, recipient)?;
+
+    // Flat bounty (2 × base fee) to whoever cranked the cleanup; the balance
+    // refunds to `recipient`. `min` handles a crank holding less than the
+    // bounty — reporter gets what's there, recipient gets nothing.
+    let bounty = CRANKER_REWARD.min(lamports_now);
+    let refund = lamports_now - bounty;
+
+    crank_ai.set_lamports(0);
+
+    let new_reporter = reporter
+        .lamports()
+        .checked_add(bounty)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    reporter.set_lamports(new_reporter);
+
+    // When `recipient` aliases `reporter`, the write above is visible here, so
+    // adding `refund` on top preserves the sum. Distinct accounts: clean credit.
+    let new_recipient = recipient
+        .lamports()
+        .checked_add(refund)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    recipient.set_lamports(new_recipient);
+
+    Ok(())
 }
