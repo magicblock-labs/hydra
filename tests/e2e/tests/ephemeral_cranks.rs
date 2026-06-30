@@ -32,8 +32,8 @@
 //!
 //! ```sh
 //! # from the hydra workspace root
-//! cargo build-sbf -- --features ephemeral                        # target/deploy/hydra.so
-//! cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml # target/deploy/hydra_noop.so
+//! cargo build-sbf --manifest-path programs/hydra-ephemeral/Cargo.toml # target/deploy/hydra_ephemeral.so
+//! cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml      # target/deploy/hydra_noop.so
 //! ```
 //!
 //! The `hydra-cranker` binary is built automatically by the test (see
@@ -174,7 +174,7 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
     let tmp = stack.tmp.path().to_path_buf();
 
     // Resolve build artifacts up front so a missing prerequisite fails fast.
-    let hydra_so = artifact("target/deploy/hydra.so")?;
+    let hydra_so = artifact("target/deploy/hydra_ephemeral.so")?;
     let noop_so = artifact("target/deploy/hydra_noop.so")?;
     // The cranker MUST be the `ephemeral` build (it targets the `eHyd…` program
     // and skips the lamport-funding checks). A plain `cargo build -p

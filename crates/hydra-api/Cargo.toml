@@ -24,11 +24,17 @@ cpi-native = [
 # `pinocchio::cpi::invoke_signed` with `InstructionView`s built on the
 # stack (no allocations, usable from `no_std` programs).
 cpi-pinocchio = ["pinocchio/cpi", "dep:solana-program-error"]
+# Shared on-chain processor building blocks (schedule parsing, tail
+# serialization, follow-up verification, sysvar syscalls) consumed by the
+# `programs/hydra` and `programs/hydra-ephemeral` program crates. Pulls in
+# `solana-define-syscall` for the raw Clock / stack-height reads.
+program = ["pinocchio/cpi", "dep:solana-define-syscall"]
 
 [dependencies]
 ephemeral-rollups-pinocchio = { workspace = true }
 pinocchio = { workspace = true }
 solana-address = { workspace = true }
+solana-define-syscall = { workspace = true, optional = true }
 solana-instruction = { workspace = true, optional = true }
 solana-pubkey = { workspace = true, optional = true }
 solana-account-info = { version = "3", optional = true }

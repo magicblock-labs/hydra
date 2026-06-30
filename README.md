@@ -121,7 +121,7 @@ Examples:
 ## Creating a Crank
 
 ```rust
-use hydra_api::instruction::{self as ix, CreateArgs, ScheduledIx};
+use hydra_api::instruction::{base as ix, CreateArgs, ScheduledIx};
 
 let seed = [0x42u8; 32];
 let (crank, _bump) = ix::find_crank_pda(&seed);
@@ -270,9 +270,19 @@ Useful alerts:
 
 ## Instruction Reference
 
-Discriminators `0–3` are the base-layer crank. Discriminators `4–7` are the
-[ephemeral-rollup crank](#ephemeral-rollup-crank-feature-ephemeral), compiled
-only under the `ephemeral` feature.
+Hydra ships as **two on-chain programs** that share the same discriminators
+(`0–3`) and on-chain `Crank` layout, distinguished by program ID:
+
+- `hydra` (`Hydra17…`) — the base-layer crank, in `programs/hydra`.
+- `hydra-ephemeral` (`eHyd5…`) — the
+  [ephemeral-rollup crank](#ephemeral-rollup-crank-hydra-ephemeral-program), in
+  `programs/hydra-ephemeral`.
+
+The instruction-parsing, tail-serialization and follow-up-verification logic is
+shared between them via [`hydra_api::program`] (behind the api crate's `program`
+feature); each program only carries its own account-funding model.
+
+The base-layer (`hydra`) instructions:
 
 | Disc | Name      | Accounts                                      | Data             |
 | ---: | --------- | --------------------------------------------- | ---------------- |
@@ -292,13 +302,15 @@ the crank PDA — no dedicated instruction exists.
 - `MAX_DATA_LEN = 1024`
 - reward is fixed at `10_000` lamports plus the stored priority tip
 
-## Ephemeral Rollup Crank (feature `ephemeral`)
+## Ephemeral Rollup Crank (`hydra-ephemeral` program)
 
-Behind the optional `ephemeral` cargo feature, Hydra exposes a parallel set of
-instructions that run a crank on a [MagicBlock](https://magicblock.gg) **ephemeral
-rollup (ER)**, where the crank lives as a MagicBlock **ephemeral account** instead
-of a base-layer PDA. The default (mainnet) build neither compiles this code nor
-pulls its dependency (`ephemeral-rollups-pinocchio`).
+The separate `hydra-ephemeral` program (ID `eHyd5…`, crate
+`programs/hydra-ephemeral`) runs a crank on a
+[MagicBlock](https://magicblock.gg) **ephemeral rollup (ER)**, where the crank
+lives as a MagicBlock **ephemeral account** instead of a base-layer PDA. The
+base-layer `hydra` program neither contains this code nor depends on
+`ephemeral-rollups-pinocchio`; the two programs share their schedule/verify
+logic through [`hydra_api::program`].
 
 The model is the same as the base crank — a crank stores scheduled instructions,
 anyone triggers them when due, and `Trigger` verifies the follow-up siblings with
@@ -306,16 +318,16 @@ the same single `memcmp` — with two differences the ER forces:
 
 - **Ephemeral accounts hold zero lamports.** Rent (a flat per-byte fee) is paid by
   a sponsor into a shared vault, not held in the account. So there is no cranker
-  reward, no priority-tip payout, and no rent floor: `TriggerEphemeral` only
+  reward, no priority-tip payout, and no rent floor: the ephemeral `Trigger` only
   verifies the follow-up ix and advances the schedule (slot check, decrement
   `remaining`, bump `executed`).
 - **Creation is a single instruction.** The Magic program materializes the
-  ephemeral account synchronously, so `CreateEphemeral` allocates the crank (via a
+  ephemeral account synchronously, so `Create` allocates the crank (via a
   Magic CPI signed by the crank PDA) and writes its header + scheduled-ix tail in
   one instruction — no separate init step.
 
-Lifecycle: `CreateEphemeral` → `TriggerEphemeral` (+ scheduled siblings, run
-top-level on the ER) → `CancelEphemeral` (authority-gated) / `CloseEphemeral`
+Lifecycle: `Create` → `Trigger` (+ scheduled siblings, run
+top-level on the ER) → `Cancel` (authority-gated) / `Close`
 (permissionless, when the crank is exhausted or stuck). `Cancel`/`Close` CPI the
 Magic program to close the ephemeral account and refund the vault rent to the
 sponsor; if a non-zero `authority` is set, only that authority may close it. The
@@ -324,25 +336,29 @@ unchanged, so the template / verification model is identical.
 
 ### Instruction Reference (ephemeral)
 
-| Disc | Name               | Accounts                                            | Data             |
-| ---: | ------------------ | --------------------------------------------------- | ---------------- |
-|    4 | `CreateEphemeral`  | `sponsor(w,s), crank(w), vault(w), magic_program`   | schedule payload |
-|    5 | `TriggerEphemeral` | `crank(w), cranker(w,s), instructions_sysvar`       | none             |
-|    6 | `CancelEphemeral`  | `authority(w,s), crank(w), vault(w), magic_program` | none             |
-|    7 | `CloseEphemeral`   | `reporter(w,s), crank(w), vault(w), magic_program`  | none             |
+Same discriminators as the base program (`0–3`); the account shapes differ
+because creation/close go through the Magic program rather than the System
+program.
+
+| Disc | Name      | Accounts                                            | Data             |
+| ---: | --------- | --------------------------------------------------- | ---------------- |
+|    0 | `Create`  | `sponsor(w,s), crank(w), vault(w), magic_program`   | schedule payload |
+|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar`       | none             |
+|    2 | `Cancel`  | `authority(w,s), crank(w), vault(w), magic_program` | none             |
+|    3 | `Close`   | `reporter(w,s), crank(w), vault(w), magic_program`  | none             |
 
 `vault` is the ephemeral rent vault and `magic_program` is MagicBlock's Magic
 program; `hydra-api` exposes both as `consts::magic::EPHEMERAL_VAULT_ID` /
 `MAGIC_PROGRAM_ID`, and the `client`-feature builder fills them in. `sponsor` must
 be an account delegated to the ER (it pays the rent and sets `authority_signer`).
 
-Build a `CreateEphemeral` with the same `CreateArgs` as base `create`:
+Build an ephemeral `Create` with the same `CreateArgs` as base `create`:
 
 ```rust
-use hydra_api::instruction::{self as ix, CreateArgs, ScheduledIx};
+use hydra_api::instruction::{ephemeral as ix, CreateArgs, ScheduledIx};
 
 let (crank, _bump) = ix::find_crank_pda(&seed);
-let create = ix::create_ephemeral(
+let create = ix::create(
     sponsor_pubkey,
     crank,
     &CreateArgs { seed, authority, start_slot: 0, interval_slots: 50,
@@ -366,7 +382,7 @@ npm install -g @magicblock-labs/ephemeral-validator   # mb-test-validator + ephe
 
 # Build the on-chain artifacts the rollup clones (the hydra-cranker is built
 # automatically by the test and run with `--ephemeral`).
-cargo build-sbf -- --features ephemeral
+cargo build-sbf --manifest-path programs/hydra-ephemeral/Cargo.toml
 cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
 
 # The test is `#[ignore]` (it spawns external validators); run it explicitly.
@@ -377,8 +393,9 @@ CI runs this as the `e2e` job in `.github/workflows/ci.yml`.
 
 ## Releasing
 
-`hydra-api` is the only crate published to crates.io (`hydra` is a program,
-not a library; `hydra-cranker` / the examples are workspace-local).
+`hydra-api` is the only crate published to crates.io (`hydra` and
+`hydra-ephemeral` are programs, not libraries; `hydra-cranker` / the examples
+are workspace-local).
 
 Release flow:
 

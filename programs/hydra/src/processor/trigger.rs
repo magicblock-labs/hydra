@@ -15,13 +15,12 @@ use hydra_api::{
     HydraError,
 };
 
-use crate::{
+use hydra_api::program::{
     helpers::{get_clock_slot, get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
-    processor::{
-        base::common::{read_u64, write_u64},
-        common::{read_u16, verify_followup},
-    },
+    processor::{read_u16, verify_followup},
 };
+
+use crate::processor::common::{read_u64, write_u64};
 
 // Field offsets inside the 120-byte `Crank` header, kept local to this file
 // so the raw reads below stay easy to verify against the account layout.
@@ -43,7 +42,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     if !cranker_ai.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::base::ID) {
+    if !crank_ai.owned_by(&crate::ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     if ix_sysvar_ai.address() != &INSTRUCTIONS_ID {

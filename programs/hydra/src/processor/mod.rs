@@ -1,11 +1,12 @@
-pub mod common;
+//! Base-layer crank lifecycle.
+//!
+//! Schedule parsing, tail serialization and follow-up verification are shared
+//! with the ephemeral-rollup program via [`hydra_api::program`]; only the
+//! System-program funding model lives here.
 
-#[cfg(not(feature = "ephemeral"))]
-mod base;
-#[cfg(not(feature = "ephemeral"))]
-pub use base::*;
+pub mod cancel;
+pub mod close;
+pub mod create;
+pub mod trigger;
 
-#[cfg(feature = "ephemeral")]
-mod ephemeral;
-#[cfg(feature = "ephemeral")]
-pub use ephemeral::*;
+mod common;

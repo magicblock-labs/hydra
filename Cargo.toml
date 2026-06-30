@@ -3,6 +3,7 @@ resolver = "2"
 default-members = ["programs/hydra"]
 members = [
     "programs/hydra",
+    "programs/hydra-ephemeral",
     "crates/hydra-api",
     "crates/hydra-cranker",
     "tests",
@@ -59,5 +60,5 @@ overflow-checks = true
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(target_os, values("solana"))',
-    'cfg(feature, values("create-account-allow-prefund", "custom-alloc", "custom-panic", "no-entrypoint", "logging", "ephemeral"))',
+    'cfg(feature, values("create-account-allow-prefund", "custom-alloc", "custom-panic", "no-entrypoint", "logging", "ephemeral", "program"))',
 ] }

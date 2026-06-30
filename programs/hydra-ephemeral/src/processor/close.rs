@@ -12,16 +12,17 @@ use pinocchio::{error::ProgramError, AccountView, ProgramResult};
 
 use hydra_api::{state::load_crank, HydraError, STALENESS_THRESHOLD_SLOTS};
 
-use crate::helpers::get_clock_slot;
-use crate::processor::common::{require_refund_recipient, require_signed_crank};
-use crate::processor::ephemeral::common::check_magic_accounts;
+use hydra_api::program::helpers::get_clock_slot;
+use hydra_api::program::processor::{require_refund_recipient, require_signed_crank};
+
+use crate::processor::common::check_magic_accounts;
 
 pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [reporter, crank_ai, vault, magic_program] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    require_signed_crank(reporter, crank_ai, &hydra_api::ephemeral::ID)?;
+    require_signed_crank(reporter, crank_ai, &crate::ID)?;
     check_magic_accounts(vault, magic_program)?;
 
     let (stored_authority, remaining, next_exec_slot) = {

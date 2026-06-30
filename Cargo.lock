@@ -2284,7 +2284,6 @@ dependencies = [
 name = "hydra"
 version = "0.1.1"
 dependencies = [
- "ephemeral-rollups-pinocchio",
  "hydra-api",
  "pinocchio 0.10.2",
  "pinocchio-log",
@@ -2301,6 +2300,7 @@ dependencies = [
  "solana-account-info 3.1.1",
  "solana-address 2.6.1",
  "solana-cpi 3.1.0",
+ "solana-define-syscall 5.1.0",
  "solana-instruction 3.4.0",
  "solana-program-error 3.0.1",
  "solana-pubkey 4.2.0",
@@ -2357,6 +2357,17 @@ dependencies = [
  "solana-signer 3.0.1",
  "solana-system-interface 2.0.0",
  "solana-transaction 3.1.0",
+]
+
+[[package]]
+name = "hydra-ephemeral"
+version = "0.1.1"
+dependencies = [
+ "ephemeral-rollups-pinocchio",
+ "hydra-api",
+ "pinocchio 0.10.2",
+ "pinocchio-log",
+ "solana-define-syscall 5.1.0",
 ]
 
 [[package]]

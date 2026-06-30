@@ -8,15 +8,16 @@
 use ephemeral_rollups_pinocchio::ephemeral_accounts::EphemeralAccount;
 use pinocchio::{error::ProgramError, AccountView, ProgramResult};
 
-use crate::processor::common::require_cancel_authority;
-use crate::processor::ephemeral::common::check_magic_accounts;
+use hydra_api::program::processor::require_cancel_authority;
+
+use crate::processor::common::check_magic_accounts;
 
 pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [authority, crank_ai, vault, magic_program] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    require_cancel_authority(authority, crank_ai, &hydra_api::ephemeral::ID)?;
+    require_cancel_authority(authority, crank_ai, &crate::ID)?;
     check_magic_accounts(vault, magic_program)?;
 
     // The ephemeral account need not sign on close; `authority` is the sponsor

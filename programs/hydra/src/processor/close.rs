@@ -12,15 +12,15 @@ use hydra_api::{
     HydraError,
 };
 
-use crate::helpers::get_clock_slot;
-use crate::processor::common::{require_refund_recipient, require_signed_crank};
+use hydra_api::program::helpers::get_clock_slot;
+use hydra_api::program::processor::{require_refund_recipient, require_signed_crank};
 
 pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [reporter, crank_ai, recipient] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    require_signed_crank(reporter, crank_ai, &hydra_api::base::ID)?;
+    require_signed_crank(reporter, crank_ai, &crate::ID)?;
 
     // Snapshot fields we need from the crank header.
     let (stored_authority, remaining, rent_min, priority_tip, next_exec_slot, lamports_now) = {

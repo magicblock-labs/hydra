@@ -5,4 +5,4 @@ mod entrypoint;
 
 mod processor;
 
-pub use hydra_api::base::*;
+pub use hydra_api::ephemeral::*;

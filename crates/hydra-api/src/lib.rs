@@ -10,6 +10,8 @@ pub mod consts;
 pub mod cpi;
 pub mod error;
 pub mod instruction;
+#[cfg(feature = "program")]
+pub mod program;
 pub mod state;
 
 pub use consts::*;

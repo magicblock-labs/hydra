@@ -12,13 +12,12 @@ use pinocchio::{
 
 use hydra_api::{
     consts::REMAINING_INFINITE,
+    program::{
+        helpers::{get_clock_slot, get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
+        processor::verify_followup,
+    },
     state::{load_crank, load_crank_mut},
     HydraError,
-};
-
-use crate::{
-    helpers::{get_clock_slot, get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
-    processor::common::verify_followup,
 };
 
 pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
@@ -29,7 +28,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     if !cranker_ai.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::ephemeral::ID) {
+    if !crank_ai.owned_by(&crate::ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     if ix_sysvar_ai.address() != &INSTRUCTIONS_ID {

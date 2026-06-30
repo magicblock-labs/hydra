@@ -16,11 +16,11 @@ use pinocchio::{
 };
 
 use hydra_api::consts::{CRANK_HEADER_SIZE, CRANK_SEED_PREFIX};
-
-use crate::processor::common::{
+use hydra_api::program::processor::{
     derive_crank_pda, measure_region, parse_create_header, write_crank,
 };
-use crate::processor::ephemeral::common::check_magic_accounts;
+
+use crate::processor::common::check_magic_accounts;
 
 pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [sponsor, crank_ai, vault, magic_program] = accounts else {
@@ -36,7 +36,7 @@ pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     // Size the account from the scheduled ixs (validates the schedule), then
     // allocate it. The exact tail is written below.
     let region_len = measure_region(data)?;
-    let bump = derive_crank_pda(crank_ai, &header.seed, &hydra_api::ephemeral::ID)?;
+    let bump = derive_crank_pda(crank_ai, &header.seed, &crate::ID)?;
     let data_len = CRANK_HEADER_SIZE + region_len;
 
     // The crank PDA must sign the create CPI (the ephemeral account is a signer

@@ -99,7 +99,7 @@ pub mod base {
         use crate::{consts::ix as disc, instruction::CREATE_FIXED_PREFIX_LEN};
 
         #[inline]
-        pub fn create<'a, const N: usize>(
+        pub fn create<const N: usize>(
             payer: &AccountView,
             crank: &AccountView,
             system_program: &AccountView,
@@ -265,7 +265,7 @@ pub mod ephemeral {
         };
 
         #[inline]
-        pub fn create<'a, const N: usize>(
+        pub fn create<const N: usize>(
             payer: &AccountView,
             crank: &AccountView,
             system_program: &AccountView,

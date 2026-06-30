@@ -1,4 +1,4 @@
-//! Shared helpers for the ephemeral-rollup crank processors.
+//! Helpers specific to the ephemeral-rollup crank processors.
 
 use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
 use pinocchio::{error::ProgramError, AccountView, ProgramResult};
