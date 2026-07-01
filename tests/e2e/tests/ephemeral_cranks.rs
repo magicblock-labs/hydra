@@ -64,6 +64,7 @@ use hydra_api::instruction::{
     ephemeral::{self as eph},
     CreateArgs,
 };
+use hydra_api::CRANKER_REWARD;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::{AccountMeta, Instruction};
@@ -539,7 +540,11 @@ fn create_crank(
             scheduled: std::slice::from_ref(&sched),
         },
     );
-    let fund_ix = system_instruction::transfer(&sponsor.pubkey(), &crank, LAMPORTS_PER_SOL / 100);
+    let fund_ix = system_instruction::transfer(
+        &sponsor.pubkey(),
+        &crank,
+        CRANKER_REWARD * TARGET_EXECUTIONS,
+    );
     send(
         rpc,
         &[create, fund_ix],
