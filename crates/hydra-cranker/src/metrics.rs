@@ -230,6 +230,7 @@ pub struct HealthSnapshot {
 impl HealthSnapshot {
     pub fn observed(
         slot: u64,
+        slot_observed_at: Instant,
         eligible_now: usize,
         triggerable_now: usize,
         parked_now: usize,
@@ -238,7 +239,7 @@ impl HealthSnapshot {
     ) -> Self {
         Self {
             slot: Some(slot),
-            slot_observed_at: Some(Instant::now()),
+            slot_observed_at: Some(slot_observed_at),
             eligible_now,
             triggerable_now,
             parked_now,

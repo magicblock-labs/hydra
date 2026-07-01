@@ -237,6 +237,7 @@ when triggerable cranks were not attempted on the latest sweep.
 | `parked_now` | gauge | — | Eligible cranks parked after repeated failures at the same `next_exec_slot`. |
 | `max_overdue_slots` | gauge | — | Largest `current_slot - next_exec_slot` among currently eligible cranks. |
 | `triggers_submitted_total` | counter | `result={ok,err}` | Triggers submitted. |
+| `closes_submitted_total` | counter | `result={ok,err}` | Permissionless `Close` transactions submitted. |
 | `ws_reconnects_total` | counter | `source={program,slot}` | WS (re)connect attempts. |
 | `grpc_reconnects_total` | counter | `source={program,slot}` | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set). |
 | `cache_events_total` | counter | `kind={insert,update,remove}` | Cache mutations driven by `programSubscribe`. |

@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
@@ -235,8 +235,8 @@ fn main() -> Result<()> {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        let slot = match slot_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(slot) => slot,
+        let (slot, slot_observed_at) = match slot_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(slot) => (slot, Instant::now()),
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
@@ -349,6 +349,7 @@ fn main() -> Result<()> {
         }
         metrics::update_health(metrics::HealthSnapshot::observed(
             slot,
+            slot_observed_at,
             eligible_now,
             triggerable_now,
             parked_now,
