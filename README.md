@@ -202,6 +202,7 @@ hydra-cranker \
   --ws-url wss://your.rpc.example
 
 # With Prometheus metrics at http://0.0.0.0:9100/metrics
+# and JSON health at http://0.0.0.0:9100/healthz
 hydra-cranker \
   --keypair ~/.config/solana/cranker.json \
   --prometheus-port 9100
@@ -218,14 +219,23 @@ hydra-cranker \
 ### Metrics
 
 When `--prometheus-port <PORT>` is set the cranker serves `/metrics` in
-Prometheus text format on `0.0.0.0:<PORT>`. All series are namespaced
-`hydra_cranker_*` and pre-initialised so `rate()` works from scrape 1.
+Prometheus text format and `/healthz` in JSON on `0.0.0.0:<PORT>`. All series
+are namespaced `hydra_cranker_*` and pre-initialised so `rate()` works from
+scrape 1.
+
+`/healthz` returns `200` while the slot stream is fresh and no eligible crank is
+parked after repeated failures. It returns `503` before the first slot, when the
+last slot sweep is older than 30 seconds, when eligible cranks are parked, or
+when triggerable cranks were not attempted on the latest sweep.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `cranks_cached` | gauge | — | Cranks currently in the in-memory cache. |
 | `current_slot` | gauge | — | Last slot observed from `slotSubscribe`. |
 | `eligible_now` | gauge | — | Cranks eligible to trigger on the last slot tick. |
+| `triggerable_now` | gauge | — | Eligible cranks after local cooldown/backoff filtering. |
+| `parked_now` | gauge | — | Eligible cranks parked after repeated failures at the same `next_exec_slot`. |
+| `max_overdue_slots` | gauge | — | Largest `current_slot - next_exec_slot` among currently eligible cranks. |
 | `triggers_submitted_total` | counter | `result={ok,err}` | Triggers submitted. |
 | `ws_reconnects_total` | counter | `source={program,slot}` | WS (re)connect attempts. |
 | `grpc_reconnects_total` | counter | `source={program,slot}` | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set). |
@@ -237,6 +247,7 @@ Useful alerts:
 
 - `increase(hydra_cranker_current_slot[1m]) < 100` — WS wedged.
 - `hydra_cranker_cranks_cached == 0` and `hydra_cranker_ws_reconnects_total > 2` — not subscribed / flaky endpoint.
+- `hydra_cranker_parked_now > 0` — at least one eligible crank repeatedly failed and is no longer being retried.
 - `rate(hydra_cranker_triggers_submitted_total{result="err"}[5m]) / rate(hydra_cranker_triggers_submitted_total[5m]) > 0.5` — majority of triggers failing.
 - `hydra_cranker_eligible_now > 0` for >30 s with no `rate(triggers_submitted_total[1m])` — have work, not doing it.
 - `histogram_quantile(0.99, rate(hydra_cranker_sweep_duration_seconds_bucket[5m])) > 0.05` — sweep p99 > 50 ms, perf regression or cache bloat.

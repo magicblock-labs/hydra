@@ -1,12 +1,16 @@
-//! Prometheus metrics + `/metrics` HTTP endpoint.
+//! Prometheus metrics + `/metrics` and `/healthz` HTTP endpoints.
 //!
-//! Minimal on purpose: five metrics, a `OnceLock` holding the registry,
-//! and a blocking `tiny_http` server thread. No async runtime, no middleware.
+//! Minimal on purpose: one registry, a health snapshot, and a blocking
+//! `tiny_http` server thread. No async runtime, no middleware.
 //!
 //! All metrics are namespaced `hydra_cranker_*`. Scrape with any Prometheus
 //! (`curl http://host:PORT/metrics` for a sanity check).
 
-use std::{sync::OnceLock, thread, time::Duration};
+use std::{
+    sync::{Mutex, OnceLock},
+    thread,
+    time::{Duration, Instant},
+};
 
 use prometheus::{
     register_histogram_with_registry, register_int_counter_vec_with_registry,
@@ -45,6 +49,15 @@ pub struct Metrics {
     /// Cranks that were eligible on the most recent slot tick (ready to
     /// trigger). Point-in-time snapshot, overwritten every scan.
     pub eligible_now: IntGauge,
+
+    /// Cranks eligible after local cooldown/backoff filtering.
+    pub triggerable_now: IntGauge,
+
+    /// Eligible cranks parked after repeated failures at the same next_exec_slot.
+    pub parked_now: IntGauge,
+
+    /// Largest `current_slot - next_exec_slot` among currently eligible cranks.
+    pub max_overdue_slots: IntGauge,
 
     /// Duration of each slot-tick sweep: scan cache + fire all eligible.
     /// Custom fine-grained buckets targeted at the <10 ms healthy range.
@@ -111,6 +124,24 @@ impl Metrics {
             registry
         )
         .unwrap();
+        let triggerable_now = register_int_gauge_with_registry!(
+            "triggerable_now",
+            "Cranks eligible after local cooldown/backoff filtering.",
+            registry
+        )
+        .unwrap();
+        let parked_now = register_int_gauge_with_registry!(
+            "parked_now",
+            "Eligible cranks parked after repeated failures at the same next_exec_slot.",
+            registry
+        )
+        .unwrap();
+        let max_overdue_slots = register_int_gauge_with_registry!(
+            "max_overdue_slots",
+            "Largest current_slot - next_exec_slot among currently eligible cranks.",
+            registry
+        )
+        .unwrap();
         // Fine-grained buckets targeted at the healthy sub-10ms range; upper
         // buckets catch pathological sweeps (stuck lock, bursty RPC).
         let sweep_duration_seconds = register_histogram_with_registry!(
@@ -168,6 +199,9 @@ impl Metrics {
             grpc_reconnects_total,
             cache_events_total,
             eligible_now,
+            triggerable_now,
+            parked_now,
+            max_overdue_slots,
             sweep_duration_seconds,
             rpc_errors_total,
         }
@@ -180,7 +214,94 @@ pub fn metrics() -> &'static Metrics {
     METRICS.get_or_init(Metrics::new)
 }
 
-/// Spawn a blocking HTTP server serving `GET /metrics` in text format.
+const HEALTH_SLOT_STALE_AFTER: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HealthSnapshot {
+    pub slot: Option<u64>,
+    pub slot_observed_at: Option<Instant>,
+    pub eligible_now: usize,
+    pub triggerable_now: usize,
+    pub parked_now: usize,
+    pub max_overdue_slots: u64,
+    pub last_trigger_attempt_slot: Option<u64>,
+}
+
+impl HealthSnapshot {
+    pub fn observed(
+        slot: u64,
+        eligible_now: usize,
+        triggerable_now: usize,
+        parked_now: usize,
+        max_overdue_slots: u64,
+        last_trigger_attempt_slot: Option<u64>,
+    ) -> Self {
+        Self {
+            slot: Some(slot),
+            slot_observed_at: Some(Instant::now()),
+            eligible_now,
+            triggerable_now,
+            parked_now,
+            max_overdue_slots,
+            last_trigger_attempt_slot,
+        }
+    }
+}
+
+static HEALTH: OnceLock<Mutex<HealthSnapshot>> = OnceLock::new();
+
+fn health() -> &'static Mutex<HealthSnapshot> {
+    HEALTH.get_or_init(|| Mutex::new(HealthSnapshot::default()))
+}
+
+pub fn update_health(snapshot: HealthSnapshot) {
+    metrics()
+        .triggerable_now
+        .set(snapshot.triggerable_now as i64);
+    metrics().parked_now.set(snapshot.parked_now as i64);
+    metrics()
+        .max_overdue_slots
+        .set(snapshot.max_overdue_slots as i64);
+    *health().lock().expect("health snapshot poisoned") = snapshot;
+}
+
+fn render_health() -> (tiny_http::StatusCode, Vec<u8>) {
+    let snapshot = *health().lock().expect("health snapshot poisoned");
+    let slot_age_ms = snapshot.slot_observed_at.map(|at| at.elapsed().as_millis());
+    let (ok, reason) = match (snapshot.slot, slot_age_ms) {
+        (None, _) => (false, "no slots observed"),
+        (_, Some(age)) if age > HEALTH_SLOT_STALE_AFTER.as_millis() => (false, "slot stream stale"),
+        (_, _) if snapshot.parked_now > 0 => (false, "parked eligible cranks"),
+        (Some(slot), _)
+            if snapshot.triggerable_now > 0 && snapshot.last_trigger_attempt_slot != Some(slot) =>
+        {
+            (false, "triggerable cranks not attempted")
+        }
+        _ => (true, "ok"),
+    };
+    let status = if ok { 200 } else { 503 };
+    let slot = snapshot
+        .slot
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let slot_age_ms = slot_age_ms
+        .map(|age| age.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let last_trigger_attempt_slot = snapshot
+        .last_trigger_attempt_slot
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let body = format!(
+        "{{\"ok\":{ok},\"reason\":\"{reason}\",\"slot\":{slot},\"slot_age_ms\":{slot_age_ms},\"eligible_now\":{},\"triggerable_now\":{},\"parked_now\":{},\"max_overdue_slots\":{},\"last_trigger_attempt_slot\":{last_trigger_attempt_slot}}}\n",
+        snapshot.eligible_now,
+        snapshot.triggerable_now,
+        snapshot.parked_now,
+        snapshot.max_overdue_slots,
+    );
+    (tiny_http::StatusCode(status), body.into_bytes())
+}
+
+/// Spawn a blocking HTTP server serving `GET /metrics` and `GET /healthz`.
 /// The server thread runs for the lifetime of the process; on any bind
 /// failure it logs and exits the thread (the cranker stays up).
 pub fn spawn_server(port: u16) -> thread::JoinHandle<()> {
@@ -193,23 +314,35 @@ pub fn spawn_server(port: u16) -> thread::JoinHandle<()> {
                 return;
             }
         };
-        log::info!("metrics server listening on {addr}/metrics");
+        log::info!("metrics server listening on {addr}/metrics and {addr}/healthz");
         let metrics = metrics();
         let encoder = TextEncoder::new();
         // 1s poll so a clean process exit can proceed within bounded time.
         loop {
             match server.recv_timeout(Duration::from_secs(1)) {
                 Ok(Some(req)) => {
-                    let mut body = Vec::with_capacity(1024);
-                    if let Err(e) = encoder.encode(&metrics.registry.gather(), &mut body) {
-                        log::warn!("metrics encode error: {e}");
-                        continue;
-                    }
-                    let resp = tiny_http::Response::from_data(body).with_header(
-                        "Content-Type: text/plain; version=0.0.4"
-                            .parse::<tiny_http::Header>()
-                            .unwrap(),
-                    );
+                    let path = req.url().split('?').next().unwrap_or(req.url()).to_string();
+                    let resp = if path == "/healthz" {
+                        let (status, body) = render_health();
+                        tiny_http::Response::from_data(body)
+                            .with_status_code(status)
+                            .with_header(
+                                "Content-Type: application/json"
+                                    .parse::<tiny_http::Header>()
+                                    .unwrap(),
+                            )
+                    } else {
+                        let mut body = Vec::with_capacity(1024);
+                        if let Err(e) = encoder.encode(&metrics.registry.gather(), &mut body) {
+                            log::warn!("metrics encode error: {e}");
+                            continue;
+                        }
+                        tiny_http::Response::from_data(body).with_header(
+                            "Content-Type: text/plain; version=0.0.4"
+                                .parse::<tiny_http::Header>()
+                                .unwrap(),
+                        )
+                    };
                     let _ = req.respond(resp);
                 }
                 Ok(None) => {} // timeout, just loop

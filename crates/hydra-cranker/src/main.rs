@@ -169,6 +169,7 @@ fn main() -> Result<()> {
     let mut failures: HashMap<Pubkey, FailureState> = HashMap::new();
     let mut last_submit: HashMap<Pubkey, u64> = HashMap::new();
     let mut last_close_attempt: HashMap<Pubkey, u64> = HashMap::new();
+    let mut last_trigger_attempt_slot: Option<u64> = None;
 
     // Prometheus metrics endpoint (optional).
     if let Some(port) = args.prometheus_port {
@@ -263,9 +264,14 @@ fn main() -> Result<()> {
         failures.retain(|pk, _| live_pubkeys.contains(pk));
         last_submit.retain(|pk, _| live_pubkeys.contains(pk));
         last_close_attempt.retain(|pk, _| live_pubkeys.contains(pk));
-        metrics::metrics().eligible_now.set(eligible.len() as i64);
+        let eligible_now = eligible.len();
+        metrics::metrics().eligible_now.set(eligible_now as i64);
 
+        let mut max_overdue_slots = 0;
+        let mut parked_now = 0;
+        let mut triggerable = Vec::new();
         for entry in eligible {
+            max_overdue_slots = max_overdue_slots.max(slot.saturating_sub(entry.next_exec_slot));
             if let Some(&at) = last_submit.get(&entry.pubkey) {
                 if slot < at + POST_SUBMIT_COOLDOWN_SLOTS {
                     continue;
@@ -276,6 +282,7 @@ fn main() -> Result<()> {
             if let Some(state) = failures.get(&entry.pubkey) {
                 if state.at_slot == entry.next_exec_slot {
                     if state.count >= MAX_CONSECUTIVE_FAILURES {
+                        parked_now += 1;
                         continue;
                     }
                     if slot < state.next_retry_slot {
@@ -283,6 +290,12 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            triggerable.push(entry);
+        }
+        let triggerable_now = triggerable.len();
+
+        for entry in triggerable {
+            last_trigger_attempt_slot = Some(slot);
             match fire::fire_trigger(
                 &rpc,
                 &cranker,
@@ -334,6 +347,14 @@ fn main() -> Result<()> {
                 }
             }
         }
+        metrics::update_health(metrics::HealthSnapshot::observed(
+            slot,
+            eligible_now,
+            triggerable_now,
+            parked_now,
+            max_overdue_slots,
+            last_trigger_attempt_slot,
+        ));
 
         for entry in closable {
             if let Some(&at) = last_close_attempt.get(&entry.pubkey) {
