@@ -36,9 +36,6 @@ jobs:
       - name: Format — main workspace
         run: cargo fmt --all --check
 
-      - name: Format — tests/ephemeral crate
-        run: cargo fmt --manifest-path tests/ephemeral/Cargo.toml --all --check
-
       - name: Format — tests/e2e crate
         run: cargo fmt --manifest-path tests/e2e/Cargo.toml --all --check
 
@@ -117,10 +114,6 @@ jobs:
       - name: Clippy — program (ephemeral)
         working-directory: hydra
         run: cargo clippy -p hydra-ephemeral --all-targets -- -D warnings
-
-      - name: Clippy — ephemeral test crate
-        working-directory: hydra
-        run: cargo clippy --manifest-path tests/ephemeral/Cargo.toml --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Live end-to-end: boots the real three-process stack (mb-test-validator +

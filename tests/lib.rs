@@ -27,8 +27,10 @@ use hydra_api::{
 pub const HYDRA_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/hydra");
 
 /// Absolute path to the built ephemeral `.so` (without extension).
-pub const HYDRA_EPHEMERAL_SO: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/hydra_ephemeral");
+pub const HYDRA_EPHEMERAL_SO: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../target/deploy/hydra_ephemeral"
+);
 
 // ---------------------------------------------------------------------------
 // Helpers (pub so the bench file `benches/compute_units.rs` can reuse them)
@@ -752,7 +754,17 @@ mod tests {
         let priority_tip: u64 = 2_500;
 
         let create = create_ix(
-            payer, crank_pda, SEED, [0u8; 32], 0, 100, 10, priority_tip, 0, memo::ID, &[],
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            priority_tip,
+            0,
+            memo::ID,
+            &[],
             memo_data,
         );
         let (system_program, system_program_acct) = keyed_account_for_system_program();
