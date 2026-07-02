@@ -618,6 +618,60 @@ mod tests {
         assert!(header.rent_min() > 0, "rent_min should be cached");
     }
 
+    /// A crank PDA that already holds lamports can't be created with a single
+    /// `CreateAccount` (the system program rejects nonzero-balance targets), so
+    /// `Create` falls back to Transfer-shortfall + Allocate + Assign. Exercise
+    /// that branch with a partially prefunded PDA.
+    #[test]
+    fn create_succeeds_on_prefunded_crank_pda() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let memo_data: &[u8] = b"tick";
+
+        let ix = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            1_000,
+            0,
+            memo::ID,
+            &[],
+            memo_data,
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            // Prefunded but below rent-exemption: forces the shortfall path.
+            (crank_pda, Account::new(1, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+
+        let result = mollusk.process_transaction_instructions(&[ix], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "create on prefunded pda failed: {:?}",
+            result.raw_result
+        );
+
+        let crank_acct = result
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank account");
+        assert_eq!(crank_acct.owner, hydra_id(), "owner mismatch");
+        let header = decode_header(&crank_acct.data);
+        assert_eq!(header.seed, SEED);
+        assert_eq!(header.interval_slots(), 100);
+        assert!(header.rent_min() > 0, "rent_min should be cached");
+    }
+
     #[test]
     fn trigger_happy_path_pays_reward_and_advances() {
         let mollusk = mollusk_with_hydra();
