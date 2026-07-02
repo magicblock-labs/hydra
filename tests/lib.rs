@@ -1157,6 +1157,290 @@ mod tests {
     }
 
     #[test]
+    fn create_rejects_conflicting_account_writability() {
+        // Same pubkey read-only in ix0, writable in ix1. On-chain the message
+        // compiler promotes it to writable everywhere, so the stored read-only
+        // flag could never match the instructions sysvar and the crank would be
+        // un-fireable. `Create` must reject it up front.
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let shared = Pubkey::new_unique();
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::readonly(shared)],
+                    data: b"a",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::writable(shared)],
+                    data: b"b",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let result = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            result.raw_result.is_err(),
+            "create must reject a pubkey that is read-only in one ix and writable in another"
+        );
+    }
+
+    #[test]
+    fn create_rejects_conflict_across_nonadjacent_ixs() {
+        // The conflict is between ix0 (read-only) and ix2 (writable), with an
+        // unrelated ix in between — exercises the cross-instruction tracker.
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let shared = Pubkey::new_unique();
+        let filler = Pubkey::new_unique();
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::readonly(shared)],
+                    data: b"a",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::readonly(filler)],
+                    data: b"b",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::writable(shared)],
+                    data: b"c",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let result = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            result.raw_result.is_err(),
+            "create must reject a read-only/writable conflict across non-adjacent ixs"
+        );
+    }
+
+    #[test]
+    fn create_accepts_same_account_readonly_across_ixs() {
+        // The same account read-only in two different ixs is consistent — the
+        // tracker must treat it as one account, not a conflict.
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let shared = Pubkey::new_unique();
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::readonly(shared)],
+                    data: b"a",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::readonly(shared)],
+                    data: b"b",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let result = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "create must accept the same account read-only across ixs: {:?}",
+            result.raw_result
+        );
+    }
+
+    #[test]
+    fn create_accepts_consistent_account_writability() {
+        // The same account writable in *both* siblings is fine — no promotion
+        // conflict — and must not be caught by the rejection above.
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let shared = Pubkey::new_unique();
+
+        let create = create_ix_multi(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            &[
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::writable(shared)],
+                    data: b"a",
+                },
+                ScheduledIx {
+                    program_id: memo::ID,
+                    metas: &[SchedMeta::writable(shared)],
+                    data: b"b",
+                },
+            ],
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let result = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "create must accept consistent writability: {:?}",
+            result.raw_result
+        );
+    }
+
+    /// A scheduled ix that lists the eventual cranker's account as read-only
+    /// cannot be used to sneak a write to it. On-chain the cranker is the fee
+    /// payer — signer + writable — so the message compiler promotes that meta
+    /// to signer+writable in every instruction region of the sysvar. The stored
+    /// template kept it read-only (Create forbids storing a signer flag at all,
+    /// and the cranker is unknown at schedule time), so the promoted bytes can
+    /// never match and `Trigger` reverts before the sibling ever runs — the
+    /// write to the cranker account is impossible.
+    ///
+    /// mollusk builds the sysvar from each ix's own meta (no promotion), so we
+    /// model the runtime promotion by handing the follow-up ix the cranker meta
+    /// already signer+writable — the exact bytes the validator emits.
+    #[test]
+    fn scheduled_ix_writing_cranker_as_readonly_cannot_fire() {
+        let mut mollusk = mollusk_with_hydra();
+        load_noop(&mut mollusk);
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        // Schedule a noop that references the cranker's pubkey as a read-only
+        // account. All `Create` sees is a read-only meta on some pubkey.
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            NOOP_ID,
+            &[SchedMeta::readonly(cranker)],
+            b"x",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (cranker, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+        let after_create = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            after_create.raw_result.is_ok(),
+            "create (cranker referenced read-only): {:?}",
+            after_create.raw_result
+        );
+
+        let mut funded = after_create.resulting_accounts.clone();
+        for (k, a) in funded.iter_mut() {
+            if *k == crank_pda {
+                a.lamports += 1_000_000;
+            }
+        }
+        let cranker_before = funded
+            .iter()
+            .find(|(k, _)| *k == cranker)
+            .map(|(_, a)| a.lamports)
+            .unwrap();
+
+        // The cranker is the fee payer, so its meta in the sibling region is
+        // signer+writable on-chain — not the stored read-only.
+        let trigger = trigger_ix(crank_pda, cranker);
+        let sibling = Instruction {
+            program_id: NOOP_ID,
+            accounts: vec![AccountMeta::new(cranker, true)], // promoted signer+writable
+            data: b"x".to_vec(),
+        };
+        let after = mollusk.process_transaction_instructions(&[trigger, sibling], &funded);
+        assert!(
+            after.raw_result.is_err(),
+            "trigger must reject: promoted cranker meta != stored read-only, so the write is blocked"
+        );
+
+        // The tx reverted, so the cranker was neither written nor paid.
+        let cranker_after = after
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| *k == cranker)
+            .map(|(_, a)| a.lamports)
+            .unwrap();
+        assert_eq!(
+            cranker_before, cranker_after,
+            "cranker balance must be untouched"
+        );
+    }
+
+    #[test]
     fn trigger_rejects_before_slot() {
         let mollusk = mollusk_with_hydra();
         let payer = Pubkey::new_unique();
