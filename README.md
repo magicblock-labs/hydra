@@ -151,8 +151,13 @@ let create = ix::create(
 
 Scheduled instructions run top-level, so a target program cannot rely on Hydra
 CPI signer privileges. If the scheduled ix needs to authenticate a Hydra crank,
-include the crank PDA and instructions sysvar in the scheduled ix and verify
-the sibling instructions in both directions.
+include the instructions sysvar in the scheduled ix and verify the sibling
+instructions in both directions.
+
+The crank PDA itself must **not** be one of the scheduled ix's accounts —
+`Create` rejects a schedule that names the crank (it is writable in `Trigger`,
+so the runtime would promote it and the stored template could never match). The
+scheduled program instead learns the crank from `ix[k-1]` via the sysvar.
 
 Hydra does the forward check: `Trigger` reads the instructions sysvar and
 requires `ix[k+1]` to byte-match the scheduled ix stored in the crank PDA. The
@@ -161,16 +166,19 @@ load `ix[k-1]`, and require it to be Hydra `Trigger` for the same crank PDA.
 
 ```text
 ix[k-1] = Hydra.Trigger(crank = expected_crank_pda, ...)
-ix[k]   = your scheduled ix(crank = expected_crank_pda, instructions_sysvar, ...)
+ix[k]   = your scheduled ix(instructions_sysvar, ...)   // crank PDA not an account
 ```
 
 In the scheduled program, reject unless:
 
 - `expected_crank_pda == Pubkey::find_program_address([b"crank", seed], hydra_id)`
-- `crank.owner == hydra_id`
 - the previous ix program id is `hydra_id`
 - the previous ix discriminator is `Trigger`
 - the previous ix first account is the same crank PDA
+
+The transaction is atomic, so a successful `Trigger` at `ix[k-1]` has already
+verified the crank is Hydra-owned and due — no separate `crank.owner` check is
+needed.
 
 If the scheduled ix also needs to verify who created the schedule, read the
 crank header, for example with `hydra_api::state::load_crank`, and check both

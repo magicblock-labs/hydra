@@ -1494,6 +1494,82 @@ mod tests {
         );
     }
 
+    /// A scheduled ix has no legitimate reason to name the crank PDA in its own
+    /// accounts: the crank is writable in `Trigger`, so the runtime promotes it
+    /// to writable in every instruction region of the sysvar, and a stored crank
+    /// meta could never match the template. Reverse-authentication reads
+    /// `ix[k-1]` from the instructions sysvar instead. `Create` rejects any
+    /// schedule that references the crank — here as a read-only meta.
+    #[test]
+    fn create_rejects_crank_readonly_in_scheduled_ix() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            NOOP_ID,
+            &[SchedMeta::readonly(crank_pda)],
+            b"x",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let result = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            result.raw_result.is_err(),
+            "create must reject a scheduled ix referencing the crank PDA (read-only)"
+        );
+    }
+
+    /// The rejection covers a writable crank meta too — the crank PDA must never
+    /// be a scheduled account, regardless of its flag.
+    #[test]
+    fn create_accepts_crank_writable_in_scheduled_ix() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            0,
+            0,
+            NOOP_ID,
+            &[SchedMeta::writable(crank_pda)],
+            b"x",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+        let result = mollusk.process_transaction_instructions(&[create], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "create must accept a scheduled ix referencing the crank PDA as writable"
+        );
+    }
+
     #[test]
     fn trigger_rejects_before_slot() {
         let mollusk = mollusk_with_hydra();

@@ -198,6 +198,8 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         let mut seen_pubkey_offsets = [0u32; MAX_TX_ACCOUNT_LOCKS];
         let mut seen_writability = [Writability::Unknown; MAX_TX_ACCOUNT_LOCKS];
         let mut num_distinct_accounts = 0usize;
+        // A scheduled ix may not use the crank PDA as read-only account (checked in the tail loop below).
+        let crank_pubkey: [u8; 32] = *expected_pda.as_array();
 
         while cursor < data.len() {
             if cursor + CREATE_IX_HEADER_LEN > data.len() {
@@ -235,6 +237,10 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
                 };
                 let pubkey_offset = meta_offset + 1;
                 let meta_pubkey = &data[pubkey_offset..pubkey_offset + 32];
+                // The crank PDA must never be readonly.
+                if *meta_pubkey == crank_pubkey && meta_writability == Writability::ReadOnly {
+                    return Err(HydraError::ReadonlyCrankInScheduledIx.into());
+                }
                 let mut already_seen = false;
                 for seen_index in 0..num_distinct_accounts {
                     let seen_offset = seen_pubkey_offsets[seen_index] as usize;

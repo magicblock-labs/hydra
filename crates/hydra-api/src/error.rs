@@ -31,6 +31,8 @@ pub enum HydraError {
     /// of the crank tx, so the promoted instructions-sysvar bytes could never
     /// match the read-only flag stored here and `Trigger` would never fire.
     ConflictingAccountWritability = 10,
+    /// A scheduled ix lists the crank PDA as a read-only account.
+    ReadonlyCrankInScheduledIx = 11,
 }
 
 impl From<HydraError> for ProgramError {
@@ -56,6 +58,7 @@ impl TryFrom<u32> for HydraError {
             8 => Ok(Self::SignerInScheduledIx),
             9 => Ok(Self::InvalidSchedule),
             10 => Ok(Self::ConflictingAccountWritability),
+            11 => Ok(Self::ReadonlyCrankInScheduledIx),
             _ => Err(ProgramError::InvalidArgument),
         }
     }
@@ -75,6 +78,7 @@ impl ToStr for HydraError {
             Self::SignerInScheduledIx => "HydraError::SignerInScheduledIx",
             Self::InvalidSchedule => "HydraError::InvalidSchedule",
             Self::ConflictingAccountWritability => "HydraError::ConflictingAccountWritability",
+            Self::ReadonlyCrankInScheduledIx => "HydraError::ReadonlyCrankInScheduledIx",
         }
     }
 }
