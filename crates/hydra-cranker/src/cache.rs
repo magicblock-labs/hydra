@@ -78,6 +78,21 @@ impl CrankEntry {
         self.lamports >= self.rent_min.saturating_add(reward)
     }
 
+    /// True if any scheduled instruction lists `account` among its metas,
+    /// regardless of the stored read/write flag. Such a crank is unsafe to run
+    /// when `account` is the cranker's own pubkey: as the tx fee payer the
+    /// cranker is signer + writable, so the runtime promotes every reference to
+    /// it and the crank can never fire (and must not, since it would grant a
+    /// scheduled ix write access to the cranker's account).
+    pub fn references_account(&self, account: &Pubkey) -> bool {
+        hydra_api::instruction::scheduled_ixs_from_crank(&self.data)
+            .map(|ixs| {
+                ixs.iter()
+                    .any(|ix| ix.accounts.iter().any(|m| &m.pubkey == account))
+            })
+            .unwrap_or(false)
+    }
+
     /// Mirrors on-chain `Close` pre-condition: exhausted OR underfunded OR
     /// stuck (`current_slot - next_exec_slot > STALENESS_THRESHOLD_SLOTS`).
     pub fn is_closable(&self, current_slot: u64) -> bool {
@@ -168,7 +183,24 @@ pub fn apply_update(cache: &Cache, pubkey: Pubkey, lamports: u64, data: &[u8]) -
 
 #[cfg(test)]
 mod tests {
+    use hydra_api::META_FLAG_WRITABLE;
+
     use super::*;
+
+    /// Build a raw crank buffer (120-byte header + one scheduled ix that lists
+    /// `metas` in the on-chain tail wire layout).
+    fn crank_with_metas(metas: &[(Pubkey, bool)]) -> Vec<u8> {
+        let mut data = vec![0u8; CRANK_HEADER_SIZE];
+        // tail: [num_accounts u16][ [flag u8][pk 32] * n ][program_id 32][data_len u16][data]
+        data.extend_from_slice(&(metas.len() as u16).to_le_bytes());
+        for (pk, writable) in metas {
+            data.push(if *writable { META_FLAG_WRITABLE } else { 0 });
+            data.extend_from_slice(pk.as_ref());
+        }
+        data.extend_from_slice(Pubkey::new_unique().as_ref()); // program_id
+        data.extend_from_slice(&0u16.to_le_bytes()); // data_len = 0
+        data
+    }
 
     fn entry(next_exec_slot: u64, interval_slots: u64, remaining: u64) -> CrankEntry {
         CrankEntry {
@@ -241,5 +273,36 @@ mod tests {
         let pk = seed(&cache, entry(100, 1, 0));
         advance_after_trigger(&cache, pk, 100);
         assert_eq!(snapshot(&cache, &pk).1, 0, "remaining == 0 stays 0");
+    }
+
+    #[test]
+    fn references_account_detects_metas_regardless_of_flag() {
+        let cranker = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+
+        // Read-only reference is still a reference.
+        let ro = CrankEntry::from_raw(
+            Pubkey::new_unique(),
+            1,
+            &crank_with_metas(&[(cranker, false)]),
+        )
+        .unwrap();
+        assert!(ro.references_account(&cranker));
+        assert!(!ro.references_account(&other));
+
+        // Writable reference too.
+        let rw = CrankEntry::from_raw(
+            Pubkey::new_unique(),
+            1,
+            &crank_with_metas(&[(cranker, true)]),
+        )
+        .unwrap();
+        assert!(rw.references_account(&cranker));
+
+        // A schedule that does not mention the cranker is safe.
+        let clean =
+            CrankEntry::from_raw(Pubkey::new_unique(), 1, &crank_with_metas(&[(other, true)]))
+                .unwrap();
+        assert!(!clean.references_account(&cranker));
     }
 }

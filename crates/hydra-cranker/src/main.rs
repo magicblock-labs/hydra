@@ -118,6 +118,14 @@ struct Cli {
     /// `--rpc-url` at a MagicBlock ephemeral validator.
     #[arg(long, env = "HYDRA_CRANKER_EPHEMERAL", default_value_t = false)]
     ephemeral: bool,
+    /// Run *every* eligible crank, including ones whose scheduled instructions
+    /// reference the cranker's own pubkey. Such cranks can't actually fire — as
+    /// the fee payer the cranker is promoted to signer + writable, so the
+    /// follow-up bytes never match the stored template — and would, if they
+    /// could, hand a scheduled ix write access to the cranker's account. They
+    /// are skipped by default; this flag opts back in.
+    #[arg(long = "unsafe", env = "HYDRA_CRANKER_UNSAFE", default_value_t = false)]
+    run_unsafe: bool,
 }
 
 fn default_ws_url(rpc_url: &str) -> String {
@@ -158,11 +166,15 @@ fn main() -> Result<()> {
     let args = Cli::parse();
     mode::init(args.ephemeral);
     let cranker = load_keypair(&args.keypair)?;
-    log::info!("cranker pubkey = {}", cranker.pubkey());
+    let cranker_pubkey = cranker.pubkey();
+    log::info!("cranker pubkey = {}", cranker_pubkey);
     log::info!(
         "mode = {}",
         if args.ephemeral { "ephemeral" } else { "base" }
     );
+    if args.run_unsafe {
+        log::warn!("--unsafe: running cranks that reference the cranker's own pubkey");
+    }
 
     // Bootstrap must use the same commitment as `programSubscribe` or a
     // reconnect hands off a stale cache.
@@ -269,6 +281,17 @@ fn main() -> Result<()> {
                 if entry.is_closable(slot) {
                     clos.push(entry.clone());
                 } else if entry.is_eligible(slot) {
+                    // A crank that references the cranker's own pubkey can never
+                    // fire (the cranker is promoted to signer + writable as the
+                    // fee payer) and is unsafe to run — skip unless `--unsafe`.
+                    if !args.run_unsafe && entry.references_account(&cranker_pubkey) {
+                        log::debug!(
+                            "slot {}: skipping crank {} — references cranker pubkey (use --unsafe to run)",
+                            slot,
+                            entry.pubkey
+                        );
+                        continue;
+                    }
                     elig.push(entry.clone());
                 }
             }
