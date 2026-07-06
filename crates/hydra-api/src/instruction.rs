@@ -104,7 +104,35 @@ mod client {
         pub data: &'a [u8],
     }
 
-    /// All the scheduling knobs for `Create`
+    /// All the scheduling knobs for `Create`.
+    ///
+    /// # Caller responsibilities (the program does NOT check these)
+    ///
+    /// `Create` validates the wire format, the signer-flag ban, and a few
+    /// numeric bounds, but it deliberately does **not** verify that the schedule
+    /// is actually *crankable*. A schedule that violates any rule below is
+    /// accepted and stored, but every `Trigger` will fail — the crank is created
+    /// yet can never fire, stranding its rent. The client is the only party with
+    /// the full account picture, so these are its responsibility:
+    ///
+    /// 1. **Consistent writability per account.** If the same pubkey appears in
+    ///    more than one scheduled ix (or more than once in one ix), it must carry
+    ///    the *same* `is_writable` flag every time. The Solana runtime promotes an
+    ///    account to writable in *every* instruction region of the crank tx if it
+    ///    is writable in any of them; `Trigger` byte-matches the follow-up ix
+    ///    against the stored template, and a promoted `writable` flag can never
+    ///    match a stored `read-only` one.
+    ///
+    /// 2. **The crank PDA is writable.** The crank PDA is writable in
+    ///    `Trigger` itself, so the runtime promotes it to writable everywhere.
+    ///    A scheduled program should authenticate the crank by reading
+    ///    the preceding `Trigger` from the instructions sysvar instead — not by
+    ///    listing the crank PDA as one of its own accounts.
+    ///
+    /// 3. **Be careful referencing the cranker.** The cranker is the tx fee
+    ///    payer (signer + writable) and is unknown at schedule time, so any meta
+    ///    matching it is promoted and breaks the byte-match. Moreover, the cranker
+    ///    may refuse any cranks that includes its own pubkey as an account.
     pub struct CreateArgs<'a> {
         pub seed: [u8; 32],
         /// All-zeros = unkillable (no cancel authority).
@@ -123,6 +151,11 @@ mod client {
     }
 
     /// Build a `Create` instruction.
+    ///
+    /// This only serializes the wire format; it does not validate that the
+    /// schedule is crankable. See [`CreateArgs`] for the rules the caller must
+    /// uphold (consistent writability, crank/cranker metas) — a
+    /// schedule that breaks them is accepted on-chain but can never be triggered.
     pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
         let body_len: usize = args
             .scheduled

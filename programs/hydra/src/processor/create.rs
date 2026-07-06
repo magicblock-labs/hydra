@@ -32,22 +32,12 @@ use pinocchio_system::instructions::{CreateAccountAllowPrefund, Funding};
 use hydra_api::{
     consts::{
         ix as _ix, CRANK_HEADER_SIZE, CRANK_SEED_PREFIX, MAX_ACCOUNTS, MAX_COMPUTE_UNIT_LIMIT,
-        MAX_DATA_LEN, MAX_INSTRUCTIONS, MAX_TX_ACCOUNT_LOCKS, META_FLAG_SIGNER, META_FLAG_WRITABLE,
-        REMAINING_INFINITE, SERIALIZED_META_SIZE,
+        MAX_DATA_LEN, MAX_INSTRUCTIONS, META_FLAG_SIGNER, REMAINING_INFINITE, SERIALIZED_META_SIZE,
     },
     instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN},
     state::load_crank_mut,
     HydraError,
 };
-
-/// Per-unique-account writability state used by the conflict scan in `process`.
-/// `Unknown` fills the unused slots of the fixed tracking buffer.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Writability {
-    Unknown,
-    ReadOnly,
-    Writable,
-}
 
 pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let [payer, crank_ai, _system_program] = accounts else {
@@ -190,17 +180,6 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         let mut off = 0usize;
         let mut num_instructions = 0usize;
 
-        // Writability-conflict tracker. Each distinct scheduled account is
-        // recorded once, keyed by the offset of its pubkey within `data` (so we
-        // store 4 bytes, not a 32-byte key), alongside the read/write state it
-        // was first seen with. On a later occurrence with the opposite state we
-        // reject.
-        let mut seen_pubkey_offsets = [0u32; MAX_TX_ACCOUNT_LOCKS];
-        let mut seen_writability = [Writability::Unknown; MAX_TX_ACCOUNT_LOCKS];
-        let mut num_distinct_accounts = 0usize;
-        // A scheduled ix may not use the crank PDA as read-only account (checked in the tail loop below).
-        let crank_pubkey: [u8; 32] = *expected_pda.as_array();
-
         while cursor < data.len() {
             if cursor + CREATE_IX_HEADER_LEN > data.len() {
                 return Err(ProgramError::InvalidInstructionData);
@@ -221,46 +200,14 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
             if next > data.len() {
                 return Err(ProgramError::InvalidInstructionData);
             }
-            // For each meta: reject signer flags (scheduled ixs run top-level and
-            // can only be signed by real keys, which this program can't produce),
-            // and fold the account into the writability-conflict tracker.
+            // Reject any signer flag — scheduled ixs run top-level, they can
+            // only be signed by real keys, and this program can't produce a
+            // signature for a declared pubkey anyway. Writability consistency and
+            // triggerability are the client's responsibility (see [`hydra_api::instruction::client::CreateArgs`]);
             for account_index in 0..num_accounts {
-                let meta_offset = metas_offset + account_index * SERIALIZED_META_SIZE;
-                let meta_flag = data[meta_offset];
-                if meta_flag & META_FLAG_SIGNER != 0 {
+                if data[metas_offset + account_index * SERIALIZED_META_SIZE] & META_FLAG_SIGNER != 0
+                {
                     return Err(HydraError::SignerInScheduledIx.into());
-                }
-                let meta_writability = if meta_flag & META_FLAG_WRITABLE != 0 {
-                    Writability::Writable
-                } else {
-                    Writability::ReadOnly
-                };
-                let pubkey_offset = meta_offset + 1;
-                let meta_pubkey = &data[pubkey_offset..pubkey_offset + 32];
-                // The crank PDA must never be readonly.
-                if *meta_pubkey == crank_pubkey && meta_writability == Writability::ReadOnly {
-                    return Err(HydraError::ReadonlyCrankInScheduledIx.into());
-                }
-                let mut already_seen = false;
-                for seen_index in 0..num_distinct_accounts {
-                    let seen_offset = seen_pubkey_offsets[seen_index] as usize;
-                    if data[seen_offset..seen_offset + 32] == *meta_pubkey {
-                        if seen_writability[seen_index] != meta_writability {
-                            return Err(HydraError::ConflictingAccountWritability.into());
-                        }
-                        already_seen = true;
-                        break;
-                    }
-                }
-                if !already_seen {
-                    // A distinct account that can't fit in a `Trigger` tx's lock
-                    // set makes the whole crank un-triggerable.
-                    if num_distinct_accounts == MAX_TX_ACCOUNT_LOCKS {
-                        return Err(HydraError::InvalidSchedule.into());
-                    }
-                    seen_pubkey_offsets[num_distinct_accounts] = pubkey_offset as u32;
-                    seen_writability[num_distinct_accounts] = meta_writability;
-                    num_distinct_accounts += 1;
                 }
             }
             // Tail blob, instructions-sysvar layout:

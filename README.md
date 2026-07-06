@@ -154,10 +154,14 @@ CPI signer privileges. If the scheduled ix needs to authenticate a Hydra crank,
 include the instructions sysvar in the scheduled ix and verify the sibling
 instructions in both directions.
 
-The crank PDA itself must **not** be one of the scheduled ix's accounts —
-`Create` rejects a schedule that names the crank (it is writable in `Trigger`,
-so the runtime would promote it and the stored template could never match). The
-scheduled program instead learns the crank from `ix[k-1]` via the sysvar.
+The crank PDA itself must **not** be one of the scheduled ix's accounts: it is
+writable in `Trigger`, so the runtime promotes it to writable in every ix region
+and the stored read-only/writable template could never match, leaving the crank
+un-triggerable. `Create` does *not* reject this (nor other un-crankable
+schedules) — it is the client builder's responsibility; see
+`CreateArgs` in `hydra-api::instruction` for the full list of caller rules
+(consistent writability per account, no crank/cranker metas, tx lock budget).
+The scheduled program instead learns the crank from `ix[k-1]` via the sysvar.
 
 Hydra does the forward check: `Trigger` reads the instructions sysvar and
 requires `ix[k+1]` to byte-match the scheduled ix stored in the crank PDA. The

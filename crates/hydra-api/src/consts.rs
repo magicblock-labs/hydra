@@ -22,14 +22,6 @@ pub const MAX_INSTRUCTIONS: usize = 16;
 /// Max bytes of the scheduled ix's `data` field.
 pub const MAX_DATA_LEN: usize = 1024;
 
-/// Solana's per-transaction account-lock ceiling (`MAX_TX_ACCOUNT_LOCKS`). A
-/// `Trigger` tx must lock the crank, cranker, instructions sysvar, the invoked
-/// programs, *and every scheduled account*, so a schedule referencing more than
-/// this many distinct accounts can never be cranked. `Create` uses it to bound
-/// the writability-conflict scan to a fixed, stack-sized buffer: any schedule
-/// exceeding it is rejected as un-crankable.
-pub const MAX_TX_ACCOUNT_LOCKS: usize = 128;
-
 /// Internal sentinel in `Crank.remaining` meaning "execute forever".
 /// Wire-level `0` is converted to this at `Create`.
 pub const REMAINING_INFINITE: u64 = u64::MAX;
