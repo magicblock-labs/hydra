@@ -187,7 +187,8 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
 
     // `sponsor` is delegated (signs CreateEphemeral, pays rent); `fee_payer` is
     // a plain system wallet that covers tx fees (the delegated sponsor can't be
-    // a fee payer); `cranker` pays for the triggers it submits.
+    // a fee payer); `cranker` submits the triggers *and* is credited their
+    // `CRANKER_REWARD`, so it too must be delegated.
     let sponsor = Keypair::new();
     let fee_payer = Keypair::new();
     let cranker = Keypair::new();
@@ -225,19 +226,22 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
     );
     wait_for_rpc(&base_rpc, "base", Duration::from_secs(10))?;
 
-    // 2. Fund the three keypairs on the base, then delegate the sponsor so the
-    //    rollup will let it spend its own lamports (the rent paid inside
-    //    CreateEphemeral). The fee_payer and cranker stay plain system wallets.
+    // 2. Fund the three keypairs on the base, then delegate the sponsor and the
+    //    cranker so the rollup will let their own lamports change: the sponsor
+    //    pays the vault rent inside CreateEphemeral, and the cranker is credited
+    //    each trigger's CRANKER_REWARD (a fee-payer write the rollup only allows
+    //    for a delegated account). The fee_payer stays a plain system wallet.
     airdrop(&base_rpc, &sponsor.pubkey(), 100 * LAMPORTS_PER_SOL)?;
     airdrop(&base_rpc, &fee_payer.pubkey(), 10 * LAMPORTS_PER_SOL)?;
     airdrop(&base_rpc, &cranker.pubkey(), 10 * LAMPORTS_PER_SOL)?;
-    delegate_sponsor(&base_rpc, &sponsor, &fee_payer)?;
+    delegate(&base_rpc, &sponsor, &fee_payer)?;
+    delegate(&base_rpc, &cranker, &fee_payer)?;
 
     eprintln!(
-        "[stack] funded + delegated sponsor {} (fee_payer {}, cranker {})",
+        "[stack] funded + delegated sponsor {} and cranker {} (fee_payer {})",
         sponsor.pubkey(),
-        fee_payer.pubkey(),
-        cranker.pubkey()
+        cranker.pubkey(),
+        fee_payer.pubkey()
     );
 
     // 3. Ephemeral rollup, syncing against the base. It clones the sponsor (as a
@@ -449,25 +453,28 @@ fn assert_cranker_bootstrapped_empty(tmp: &Path) -> Result<()> {
 
 // --- Sponsor delegation -----------------------------------------------------
 
-/// Make the sponsor an **on-curve delegated** account so the rollup will let it
-/// spend its own lamports (paying the ephemeral-account rent inside
-/// `CreateEphemeral`). On the rollup, a fee payer whose lamports change must be
-/// `delegated()` (`magicblock-svm/.../access_permissions.rs`) — and an
-/// undelegated escrow does *not* set that flag on the wallet. The supported
-/// path is the on-curve delegation flow (see MagicBlock's `oncurve-delegation`
-/// example): the wallet `assign`s itself to the delegation program, then is
-/// delegated to the validator, in one base-layer transaction.
+/// Make `account` an **on-curve delegated** account so the rollup will let its
+/// own lamports change during a transaction. On the rollup, an account whose
+/// lamports change must be `delegated()` — for the fee payer specifically, a
+/// non-delegated write is rejected with `InvalidAccountForFee`
+/// (`magicblock-svm/.../access_permissions.rs`); an undelegated escrow does
+/// *not* set that flag on the wallet. The supported path is the on-curve
+/// delegation flow (see MagicBlock's `oncurve-delegation` example): the wallet
+/// `assign`s itself to the delegation program, then is delegated to the
+/// validator, in one base-layer transaction. The rollup restores the original
+/// (system) owner when it clones the account, so a delegated on-curve wallet is
+/// still a valid fee payer there.
 ///
-/// A separate, system-owned `fee_payer` covers the transaction fee — the
-/// delegated sponsor can't be the fee payer (it's owned by the delegation
-/// program), and a delegated account also can't `system_program::transfer`.
-fn delegate_sponsor(base: &RpcClient, sponsor: &Keypair, fee_payer: &Keypair) -> Result<()> {
+/// A separate, system-owned `fee_payer` covers this base-layer transaction fee —
+/// on the base, `account` is owned by the delegation program after `assign`, so
+/// it can't be the fee payer nor `system_program::transfer`.
+fn delegate(base: &RpcClient, account: &Keypair, fee_payer: &Keypair) -> Result<()> {
     let dlp = delegation_program_id();
     let system = system_program_id();
-    let acct = sponsor.pubkey();
+    let acct = account.pubkey();
 
     // The wallet reassigns its own owner to the delegation program (it signs).
-    let assign = system_instruction::assign(&acct, &dlp);
+    let assign_ix = system_instruction::assign(&acct, &dlp);
 
     // delegation program `Delegate` (disc 0). PDAs: delegate buffer under the
     // *owner* (system) program, record + metadata under the delegation program.
@@ -484,7 +491,7 @@ fn delegate_sponsor(base: &RpcClient, sponsor: &Keypair, fee_payer: &Keypair) ->
     data.extend_from_slice(&0u32.to_le_bytes()); // seeds: empty
     data.push(1u8); // validator: Some(..)
     data.extend_from_slice(er_validator_identity().as_ref());
-    let delegate = Instruction {
+    let delegate_ix = Instruction {
         program_id: dlp,
         accounts: vec![
             AccountMeta::new(fee_payer.pubkey(), true), // payer
@@ -499,11 +506,11 @@ fn delegate_sponsor(base: &RpcClient, sponsor: &Keypair, fee_payer: &Keypair) ->
     };
     send(
         base,
-        &[assign, delegate],
+        &[assign_ix, delegate_ix],
         &fee_payer.pubkey(),
-        &[fee_payer, sponsor],
+        &[fee_payer, account],
     )
-    .context("delegate sponsor (on-curve)")
+    .with_context(|| format!("delegate {acct} (on-curve)"))
 }
 
 // --- Crank helpers ----------------------------------------------------------
