@@ -178,12 +178,12 @@ pub mod ephemeral {
         //! # Example
         //!
         //! ```ignore
-        //! use hydra_api::cpi::native as hydra_cpi;
+        //! use hydra_api::cpi::ephemeral::native as hydra_cpi;
         //! use hydra_api::instruction::{CreateArgs, SchedMeta};
         //!
         //! // Inside your user-facing instruction's handler:
         //! hydra_cpi::create(
-        //!     payer_ai, crank_ai, system_program_ai,
+        //!     sponsor_ai, crank_ai, vault_ai, magic_program_ai,
         //!     &CreateArgs { seed, authority: [0u8; 32], /* ... */ },
         //! )?;
         //! ```
@@ -196,16 +196,22 @@ pub mod ephemeral {
 
         #[inline]
         pub fn create<'a>(
-            payer: &AccountInfo<'a>,
+            sponsor: &AccountInfo<'a>,
             crank: &AccountInfo<'a>,
-            system_program: &AccountInfo<'a>,
+            vault: &AccountInfo<'a>,
+            magic_program: &AccountInfo<'a>,
             args: &CreateArgs<'_>,
             signer_seeds: &[&[&[u8]]],
         ) -> Result<(), ProgramError> {
-            let ix = builder::create(*payer.key, *crank.key, args);
+            let ix = builder::create(*sponsor.key, *crank.key, args);
             invoke_signed(
                 &ix,
-                &[payer.clone(), crank.clone(), system_program.clone()],
+                &[
+                    sponsor.clone(),
+                    crank.clone(),
+                    vault.clone(),
+                    magic_program.clone(),
+                ],
                 signer_seeds,
             )
         }
@@ -282,9 +288,10 @@ pub mod ephemeral {
 
         #[inline]
         pub fn create<const N: usize>(
-            payer: &AccountView,
+            sponsor: &AccountView,
             crank: &AccountView,
-            system_program: &AccountView,
+            vault: &AccountView,
+            magic_program: &AccountView,
             args: &CreateArgs<'_>,
             signers: &[Signer],
         ) -> ProgramResult {
@@ -299,12 +306,13 @@ pub mod ephemeral {
                 program_id: &crate::ephemeral::ID,
                 data: &data,
                 accounts: &[
-                    InstructionAccount::writable(payer.address()),
+                    InstructionAccount::writable_signer(sponsor.address()),
                     InstructionAccount::writable(crank.address()),
-                    InstructionAccount::writable(system_program.address()),
+                    InstructionAccount::writable(vault.address()),
+                    InstructionAccount::readonly(magic_program.address()),
                 ],
             };
-            invoke_signed(&ix, &[payer, crank, system_program], signers)
+            invoke_signed(&ix, &[sponsor, crank, vault, magic_program], signers)
         }
 
         #[inline(always)]
@@ -312,20 +320,28 @@ pub mod ephemeral {
             authority: &AccountView,
             crank: &AccountView,
             recipient: &AccountView,
+            vault: &AccountView,
+            magic_program: &AccountView,
             signers: &[Signer],
         ) -> ProgramResult {
             let data = [disc::CANCEL];
             let metas = [
-                InstructionAccount::readonly_signer(authority.address()),
+                InstructionAccount::writable_signer(authority.address()),
                 InstructionAccount::writable(crank.address()),
                 InstructionAccount::writable(recipient.address()),
+                InstructionAccount::writable(vault.address()),
+                InstructionAccount::readonly(magic_program.address()),
             ];
             let ix = InstructionView {
                 program_id: &crate::ephemeral::ID,
                 accounts: &metas,
                 data: &data,
             };
-            invoke_signed(&ix, &[authority, crank, recipient], signers)
+            invoke_signed(
+                &ix,
+                &[authority, crank, recipient, vault, magic_program],
+                signers,
+            )
         }
 
         #[inline(always)]
@@ -333,6 +349,8 @@ pub mod ephemeral {
             reporter: &AccountView,
             crank: &AccountView,
             recipient: &AccountView,
+            vault: &AccountView,
+            magic_program: &AccountView,
             signers: &[Signer],
         ) -> ProgramResult {
             let data = [disc::CLOSE];
@@ -340,13 +358,19 @@ pub mod ephemeral {
                 InstructionAccount::writable_signer(reporter.address()),
                 InstructionAccount::writable(crank.address()),
                 InstructionAccount::writable(recipient.address()),
+                InstructionAccount::writable(vault.address()),
+                InstructionAccount::readonly(magic_program.address()),
             ];
             let ix = InstructionView {
                 program_id: &crate::ephemeral::ID,
                 accounts: &metas,
                 data: &data,
             };
-            invoke_signed(&ix, &[reporter, crank, recipient], signers)
+            invoke_signed(
+                &ix,
+                &[reporter, crank, recipient, vault, magic_program],
+                signers,
+            )
         }
     }
 }
