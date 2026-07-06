@@ -193,7 +193,7 @@ mod client {
     use solana_pubkey::{pubkey, Pubkey};
 
     use crate::consts::{ix, META_FLAG_WRITABLE};
-    use crate::instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN};
+    use crate::instruction::CREATE_FIXED_PREFIX_LEN;
 
     use super::*;
 
@@ -232,12 +232,7 @@ mod client {
 
         /// Build a `Create` instruction scheduling a single instruction.
         pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
-            let body_len: usize = args
-                .scheduled
-                .iter()
-                .map(|s| CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
-                .sum();
-            let mut data = vec![0_u8; 1 + CREATE_FIXED_PREFIX_LEN + body_len];
+            let mut data = vec![0_u8; 1 + CREATE_FIXED_PREFIX_LEN + args.body_len()];
             args.write_to(&mut data);
 
             Instruction {
@@ -309,12 +304,7 @@ mod client {
 
         /// Build a `Create` instruction
         pub fn create(sponsor: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
-            let body_len: usize = args
-                .scheduled
-                .iter()
-                .map(|s| super::CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
-                .sum();
-            let mut data = vec![0_u8; 1 + super::CREATE_FIXED_PREFIX_LEN + body_len];
+            let mut data = vec![0_u8; 1 + super::CREATE_FIXED_PREFIX_LEN + args.body_len()];
             args.write_to(&mut data);
 
             Instruction {
