@@ -18,8 +18,7 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Formatting — covers both the main workspace and the isolated `tests/ephemeral`
-  # crate (it has its own `[workspace]`, so `--all` on the root doesn't reach it).
+  # Formatting — covers all root workspace members, including `tests/e2e`.
   # ---------------------------------------------------------------------------
   fmt:
     name: rustfmt
@@ -33,11 +32,8 @@ jobs:
           toolchain: 1.91.1
           components: rustfmt
 
-      - name: Format — main workspace
-        run: cargo fmt --all --check
-
-      - name: Format — tests/e2e crate
-        run: cargo fmt --manifest-path tests/e2e/Cargo.toml --all --check
+      - name: Check formatting
+        run: make fmt-check
 
   # ---------------------------------------------------------------------------
   # Default feature set: lint + tests with the `ephemeral` feature OFF.
@@ -52,7 +48,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.91.1
-          components: clippy
+          components: clippy,rustfmt
 
       - name: Install Solana toolchain (build-sbf)
         run: |
@@ -64,59 +60,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Check — anchor example
-        run: cargo check --manifest-path examples/anchor/Cargo.toml --all-targets
-
-      - name: Build on-chain programs
-        run: |
-          cargo build-sbf --manifest-path programs/hydra/Cargo.toml
-          cargo build-sbf --manifest-path programs/hydra-ephemeral/Cargo.toml
-          cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
-
-      - name: Test
-        run: cargo nextest run -p hydra-tests
-
-  # ---------------------------------------------------------------------------
-  # `ephemeral` feature set: lint + the end-to-end lifecycle tests that run
-  # against MagicSVM. The `tests/ephemeral` crate pulls `magicsvm` via a sibling
-  # path dependency (`../../../magicsvm/crates/magicsvm`), so it's checked out
-  # next to this repo.
-  # ---------------------------------------------------------------------------
-  ephemeral:
-    name: lint (ephemeral)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout hydra
-        uses: actions/checkout@v4
-        with:
-          path: hydra
-
-      - name: Install Rust (clippy)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.91.1
-          components: clippy
-
-      - name: Install Solana toolchain (build-sbf)
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            hydra
-            hydra/tests/ephemeral
-
-      - name: Clippy — program (ephemeral)
-        working-directory: hydra
-        run: cargo clippy -p hydra-ephemeral --all-targets -- -D warnings
+      - name: Default CI checks
+        run: make ci
 
   # ---------------------------------------------------------------------------
   # Live end-to-end: boots the real three-process stack (mb-test-validator +
@@ -163,14 +108,9 @@ jobs:
             tests/e2e
 
       - name: Clippy — e2e crate
-        run: cargo clippy --manifest-path tests/e2e/Cargo.toml --all-targets -- -D warnings
-
-      - name: Build on-chain programs (ephemeral)
-        run: |
-          cargo build-sbf --manifest-path programs/hydra-ephemeral/Cargo.toml
-          cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
+        run: make lint-e2e
 
       - name: Test — live ephemeral cranks
         # The test is `#[ignore]` (spawns external validators); it builds the
         # hydra-cranker itself and runs it with `--ephemeral`.
-        run: cargo test --manifest-path tests/e2e/Cargo.toml -- --ignored --nocapture --test-threads=1
+        run: make test-e2e

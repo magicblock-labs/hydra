@@ -81,22 +81,39 @@ payload size (it is a one-time cost dominated by the account-creation syscall).
 Reproduce:
 
 ```sh
-cargo build-sbf --manifest-path programs/hydra/Cargo.toml
-cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
-cargo test -p hydra-tests cu_table -- --ignored --nocapture
+make cu-table
 ```
 
 ## Build
 
+Run `make help` to list the available targets. Common commands:
+
+- `make build` — build the base and ephemeral on-chain programs.
+- `make fmt` / `make fmt-check` — format Rust sources or check formatting.
+- `make lint` — run clippy for the workspace, plus the Anchor example check.
+- `make test` — run the main `hydra-tests` suite.
+- `make test-examples` — run the native and Pinocchio example tests.
+- `make test-e2e` — run the live ephemeral-rollup e2e test.
+- `make cu-table` — reproduce the compute-unit table.
+- `make ci` — run the default CI checks locally.
+- `make install-tools` — install `cargo-nextest`.
+- `make clean` — remove Cargo build artifacts.
+
 ```sh
-# Build the on-chain program.
-cargo build-sbf --manifest-path programs/hydra/Cargo.toml
+# Show available build, lint, and test targets.
+make help
+
+# Build the on-chain programs.
+make build
 
 # Build the cranker.
 cargo build -p hydra-cranker
 
-# Run the test suite.
-cargo test -p hydra-tests
+# Run the main test suite.
+make test
+
+# Run the default CI checks locally.
+make ci
 ```
 
 ## Integrating Hydra
@@ -412,13 +429,10 @@ The validators ship as an npm package; `mb-test-validator` wraps
 ```sh
 npm install -g @magicblock-labs/ephemeral-validator   # mb-test-validator + ephemeral-validator
 
-# Build the on-chain artifacts the rollup clones (the hydra-cranker is built
-# automatically by the test and run with `--ephemeral`).
-cargo build-sbf --manifest-path programs/hydra-ephemeral/Cargo.toml
-cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
-
 # The test is `#[ignore]` (it spawns external validators); run it explicitly.
-cargo test --manifest-path tests/e2e/Cargo.toml -- --ignored --nocapture
+# `make test-e2e` builds the on-chain artifacts the rollup clones first. The
+# hydra-cranker is built automatically by the test and run with `--ephemeral`.
+make test-e2e
 ```
 
 CI runs this as the `e2e` job in `.github/workflows/ci.yml`.
