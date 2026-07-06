@@ -355,12 +355,16 @@ forces:
   sponsor.
 
 Lifecycle: `Create` → `Trigger` (+ scheduled siblings, run top-level on the ER) →
-`Cancel` (authority-gated) / `Close` (permissionless, when the crank is exhausted,
-underfunded, or stuck). On teardown the leftover balance refunds to `recipient`
-and the vault rent refunds to the sponsor (`authority` on `Cancel`, `reporter` on
-`Close`); if a non-zero `authority` is set, only that authority may be the
-`recipient`. The crank PDA derivation (`[b"crank", seed]`) and the on-chain
-`Crank` layout are unchanged, so the template / verification model is identical.
+`Cancel` (authority-gated) / `Close` (exhausted, underfunded, or stuck). On
+teardown the leftover balance refunds to `recipient` and the vault rent refunds
+to whoever signs the teardown. Because the Magic program refunds the vault rent
+to the teardown's signer, `Close` is only *permissionless for unowned cranks*
+(`authority == 0`): when a non-zero `authority` is set, only that authority may
+`Close` the crank (and only that authority may be the `recipient`), so the whole
+teardown — bounty, leftover balance, and vault rent — stays with the owner rather
+than an arbitrary reporter. Unowned cranks stay permissionlessly closable by
+anyone. The crank PDA derivation (`[b"crank", seed]`) and the on-chain `Crank`
+layout are unchanged, so the template / verification model is identical.
 
 ### Instruction Reference (ephemeral)
 
