@@ -111,16 +111,16 @@ pub mod base {
             }
 
             let mut data = [0_u8; N];
-            args.write_to(&mut data);
+            let written = args.write_to(&mut data);
 
             let ix = InstructionView {
                 program_id: &crate::base::ID,
-                data: &data,
                 accounts: &[
-                    InstructionAccount::writable(payer.address()),
+                    InstructionAccount::writable_signer(payer.address()),
                     InstructionAccount::writable(crank.address()),
-                    InstructionAccount::writable(system_program.address()),
+                    InstructionAccount::readonly(system_program.address()),
                 ],
+                data: &data[..written],
             };
 
             invoke_signed(&ix, &[payer, crank, system_program], signers)
@@ -300,11 +300,11 @@ pub mod ephemeral {
             }
 
             let mut data = [0_u8; N];
-            args.write_to(&mut data);
+            let written = args.write_to(&mut data);
 
             let ix = InstructionView {
                 program_id: &crate::ephemeral::ID,
-                data: &data,
+                data: &data[..written],
                 accounts: &[
                     InstructionAccount::writable_signer(sponsor.address()),
                     InstructionAccount::writable(crank.address()),

@@ -494,7 +494,11 @@ pub fn print_cu_table() {
 
 #[cfg(test)]
 mod tests {
-    use hydra_api::{consts::base, instruction::CreateArgs, state::region_len_for};
+    use hydra_api::{
+        consts::{base, ephemeral},
+        instruction::CreateArgs,
+        state::region_len_for,
+    };
 
     use super::*;
 
@@ -875,7 +879,7 @@ mod tests {
             .expect("cranker after trigger");
         assert_eq!(
             cranker_acct.lamports,
-            cranker_starting + base::CRANKER_REWARD + priority_tip,
+            cranker_starting + ephemeral::CRANKER_REWARD + priority_tip,
             "ephemeral cranker reward"
         );
 

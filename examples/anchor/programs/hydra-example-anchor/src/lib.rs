@@ -13,7 +13,7 @@ use hydra_api::{
     instruction::{CreateArgs, ScheduledIx},
 };
 
-declare_id!("Xyj597GykzwSu44muqNHtYs2aKUgm9ydNoHNySTDFs5");
+declare_id!("rgMuTEnEYWEK3EzqH9MkFthU9shDAPLgZX7dztEbBf4");
 
 #[program]
 pub mod hydra_example_anchor {
