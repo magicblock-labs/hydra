@@ -26,11 +26,6 @@ pub enum HydraError {
     /// `Create` data was well-formed but semantically invalid (e.g.
     /// `remaining = 0 && interval_slots = 0`).
     InvalidSchedule = 9,
-    /// A scheduled pubkey appears read-only in one instruction and writable in
-    /// another. The runtime promotes it to writable in every instruction region
-    /// of the crank tx, so the promoted instructions-sysvar bytes could never
-    /// match the read-only flag stored here and `Trigger` would never fire.
-    ConflictingAccountWritability = 10,
 }
 
 impl From<HydraError> for ProgramError {
@@ -55,7 +50,6 @@ impl TryFrom<u32> for HydraError {
             7 => Ok(Self::MismatchedFollowupIx),
             8 => Ok(Self::SignerInScheduledIx),
             9 => Ok(Self::InvalidSchedule),
-            10 => Ok(Self::ConflictingAccountWritability),
             _ => Err(ProgramError::InvalidArgument),
         }
     }
@@ -74,7 +68,6 @@ impl ToStr for HydraError {
             Self::MismatchedFollowupIx => "HydraError::MismatchedFollowupIx",
             Self::SignerInScheduledIx => "HydraError::SignerInScheduledIx",
             Self::InvalidSchedule => "HydraError::InvalidSchedule",
-            Self::ConflictingAccountWritability => "HydraError::ConflictingAccountWritability",
         }
     }
 }
