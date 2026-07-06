@@ -111,6 +111,8 @@ jobs:
         run: make lint-e2e
 
       - name: Test — live ephemeral cranks
-        # The test is `#[ignore]` (spawns external validators); it builds the
-        # hydra-cranker itself and runs it with `--ephemeral`.
-        run: make test-e2e
+        run: |
+          sudo prlimit --pid $$ --nofile=1048576:1048576
+          sudo sysctl fs.inotify.max_user_instances=1280
+          sudo sysctl fs.inotify.max_user_watches=655360
+          make test-e2e
