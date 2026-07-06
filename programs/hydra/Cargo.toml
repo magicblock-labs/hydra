@@ -25,7 +25,10 @@ cu-trace = []
 create-account-allow-prefund = []
 
 [dependencies]
-pinocchio = { workspace = true }
+# `unsafe-account-resize` lets `Create` shrink the crank account from its O(1)
+# over-provisioned size down to the exact tail length (a length-only update,
+# no syscall), so the scheduled ixs are parsed in a single pass.
+pinocchio = { workspace = true, features = ["unsafe-account-resize"] }
 pinocchio-system = { workspace = true }
 pinocchio-log = { workspace = true }
 solana-define-syscall = { workspace = true }

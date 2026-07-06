@@ -9,8 +9,17 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+custom-panic = []
+custom-heap = []
+
 [dependencies]
 pinocchio = { workspace = true }
 
 [package.metadata.solana]
 program-id = "4sdZFwGE7TkQCJVpfggvfy2ZwGNCfF6hAMJYjZU5HpZG"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ['cfg(target_os, values("solana"))']

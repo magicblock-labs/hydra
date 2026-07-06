@@ -6,30 +6,38 @@
 
 ## Packages
 
-| Package | Description | Version | Docs |
-|:--------|:------------|:--------|:-----|
-| `hydra` | Pinocchio `no_std` on-chain program | `0.1.0` | [Overview](#overview) |
+| Package     | Description                                  | Version | Docs                                    |
+| :---------- | :------------------------------------------- | :------ | :-------------------------------------- |
+| `hydra`     | Pinocchio `no_std` on-chain program          | `0.1.0` | [Overview](#overview)                   |
 | `hydra-api` | Shared Rust types, builders, and CPI helpers | `0.1.0` | [Integrating Hydra](#integrating-hydra) |
 
 ## Overview
 
-Hydra stores a scheduled instruction in a crank PDA and lets anyone trigger it
-when the schedule is due.
+Hydra stores one or more scheduled instructions in a crank PDA and lets anyone
+trigger them when the schedule is due.
 
-Each trigger transaction has two instructions:
+Each trigger transaction places the scheduled instructions immediately after
+`Trigger`:
 
 ```text
-ix[k]   = Hydra.Trigger
-ix[k+1] = scheduled instruction
+ix[k]     = Hydra.Trigger
+ix[k+1]   = scheduled instruction 1
+ix[k+2]   = scheduled instruction 2
+…
+ix[k+n]   = scheduled instruction n
 ```
 
-`Trigger` verifies `ix[k+1]` against the bytes stored in the crank account. If
-the scheduled instruction fails, the whole transaction rolls back.
+`Trigger` verifies `ix[k+1..=k+n]` against the bytes stored in the crank
+account. Because the instructions sysvar lays instruction blobs out
+contiguously, this verification is a single `memcmp` regardless of `n`. If any
+scheduled instruction fails, the whole transaction rolls back.
 
 Key constraints:
 
 - scheduled instructions run top-level, not via CPI
 - scheduled instructions cannot require signer metas
+- the scheduled instructions must be contiguous and in order, right after `Trigger`
+- a crank holds at most `MAX_INSTRUCTIONS` (16) scheduled instructions
 - `Trigger` is top-level only
 
 ## Motivation
@@ -42,26 +50,33 @@ their own program; Hydra instead verifies the scheduled instruction
 against an on-chain template at the top level and lets the runtime
 execute it as a sibling ix. No CPI frame, no dispatch overhead.
 
-The cranker submits a plain two-instruction transaction; `Trigger`
-`memcmp`s `ix[k+1]` against the bytes stored on the crank PDA at
-`Create` time (~60 CU), collects the reward, and advances state.
-Solana transaction atomicity handles failure — if the scheduled
-instruction reverts, the whole tx reverts and Hydra's payout / state
-advance revert with it. The scheduled instruction itself runs top-level
-and gets the full CU budget and stack depth.
+The cranker submits a plain transaction (`Trigger` followed by the scheduled
+instructions); `Trigger` `memcmp`s `ix[k+1..]` against the bytes stored on the
+crank PDA at `Create` time (~60 CU), collects the reward, and advances state.
+The reward and the schedule advance are flat per `Trigger`, independent of how
+many instructions the crank holds. Solana transaction atomicity handles failure
+— if any scheduled instruction reverts, the whole tx reverts and Hydra's payout
+/ state advance revert with it. The scheduled instructions themselves run
+top-level and get the full CU budget and stack depth.
 
 ## Compute Units
 
 Measured with `logging` disabled:
 
-| Instruction | Hydra CU |
-|---|---:|
-| `Create` | 3292 |
-| `Trigger` | 464 |
-| `Trigger` (reject: no follow-up) | 378 |
-| `Cancel` | 128 |
-| `Close` (reject: healthy) | 139 |
-| `Close` (underfunded) | 150 |
+| Instruction                      | Hydra CU |
+| -------------------------------- | -------: |
+| `Create`                         |     5634 |
+| `Trigger` (happy, 1 sibling)     |      466 |
+| `Trigger` (happy, 3 siblings)    |      466 |
+| `Trigger` (reject: no follow-up) |      379 |
+| `Cancel`                         |      141 |
+| `Close` (reject: healthy)        |      270 |
+| `Close` (underfunded)            |      300 |
+
+`Trigger` costs the same whether the crank schedules one instruction or many —
+the single concatenated `memcmp` is the entire verification, so adding
+instructions adds no Hydra-side CU. `Create` scales with the total scheduled
+payload size (it is a one-time cost dominated by the account-creation syscall).
 
 Reproduce:
 
@@ -88,11 +103,11 @@ cargo test -p hydra-tests
 
 Use `hydra-api` from clients or from your own on-chain program.
 
-| Use case | Feature | API |
-|---|---|---|
-| Host-side client | `client` | `Instruction` builders |
-| `solana-program` / Anchor CPI | `cpi-native` | `hydra_api::cpi::native::*` |
-| Pinocchio CPI | `cpi-pinocchio` | `hydra_api::cpi::pinocchio::*` |
+| Use case                      | Feature         | API                            |
+| ----------------------------- | --------------- | ------------------------------ |
+| Host-side client              | `client`        | `Instruction` builders         |
+| `solana-program` / Anchor CPI | `cpi-native`    | `hydra_api::cpi::native::*`    |
+| Pinocchio CPI                 | `cpi-pinocchio` | `hydra_api::cpi::pinocchio::*` |
 
 `Trigger` is not exposed as a CPI helper. It must be sent as a top-level
 instruction.
@@ -106,7 +121,7 @@ Examples:
 ## Creating a Crank
 
 ```rust
-use hydra_api::instruction::{self as ix, CreateArgs};
+use hydra_api::instruction::{self as ix, CreateArgs, ScheduledIx};
 
 let seed = [0x42u8; 32];
 let (crank, _bump) = ix::find_crank_pda(&seed);
@@ -122,9 +137,12 @@ let create = ix::create(
         remaining: 0,
         priority_tip: 2_500,
         cu_limit: 0, // 0 = cranker omits SetComputeUnitLimit; cap 1_400_000
-        scheduled_program_id: memo::ID,
-        scheduled_metas: &[],
-        scheduled_data: b"tick",
+        // One or more scheduled ixs, run top-level in order after `Trigger`.
+        scheduled: &[ScheduledIx {
+            program_id: memo::ID,
+            metas: &[],
+            data: b"tick",
+        }],
     },
 );
 ```
@@ -133,8 +151,17 @@ let create = ix::create(
 
 Scheduled instructions run top-level, so a target program cannot rely on Hydra
 CPI signer privileges. If the scheduled ix needs to authenticate a Hydra crank,
-include the crank PDA and instructions sysvar in the scheduled ix and verify
-the sibling instructions in both directions.
+include the instructions sysvar in the scheduled ix and verify the sibling
+instructions in both directions.
+
+The crank PDA itself must **not** be one of the scheduled ix's accounts: it is
+writable in `Trigger`, so the runtime promotes it to writable in every ix region
+and the stored read-only/writable template could never match, leaving the crank
+un-triggerable. `Create` does *not* reject this (nor other un-crankable
+schedules) — it is the client builder's responsibility; see
+`CreateArgs` in `hydra-api::instruction` for the full list of caller rules
+(consistent writability per account, no crank/cranker metas, tx lock budget).
+The scheduled program instead learns the crank from `ix[k-1]` via the sysvar.
 
 Hydra does the forward check: `Trigger` reads the instructions sysvar and
 requires `ix[k+1]` to byte-match the scheduled ix stored in the crank PDA. The
@@ -143,16 +170,19 @@ load `ix[k-1]`, and require it to be Hydra `Trigger` for the same crank PDA.
 
 ```text
 ix[k-1] = Hydra.Trigger(crank = expected_crank_pda, ...)
-ix[k]   = your scheduled ix(crank = expected_crank_pda, instructions_sysvar, ...)
+ix[k]   = your scheduled ix(instructions_sysvar, ...)   // crank PDA not an account
 ```
 
 In the scheduled program, reject unless:
 
 - `expected_crank_pda == Pubkey::find_program_address([b"crank", seed], hydra_id)`
-- `crank.owner == hydra_id`
 - the previous ix program id is `hydra_id`
 - the previous ix discriminator is `Trigger`
 - the previous ix first account is the same crank PDA
+
+The transaction is atomic, so a successful `Trigger` at `ix[k-1]` has already
+verified the crank is Hydra-owned and due — no separate `crank.owner` check is
+needed.
 
 If the scheduled ix also needs to verify who created the schedule, read the
 crank header, for example with `hydra_api::state::load_crank`, and check both
@@ -167,11 +197,11 @@ not proof that the authority signed the schedule creation.
 
 A crank has two upfront costs and a small per-trigger fee:
 
-| | Amount | What happens to it |
-|---|---|---|
-| **Rent deposit** | ~0.002 SOL | Locked while the crank lives, refunded on close |
-| **Create tx fee** | 5,000 lamports | Standard Solana base fee |
-| **Per trigger** | 10,000 lamports + `priority_tip` | Drawn from the crank's balance, paid to the cranker |
+|                   | Amount                           | What happens to it                                  |
+| ----------------- | -------------------------------- | --------------------------------------------------- |
+| **Rent deposit**  | ~0.002 SOL                       | Locked while the crank lives, refunded on close     |
+| **Create tx fee** | 5,000 lamports                   | Standard Solana base fee                            |
+| **Per trigger**   | 10,000 lamports + `priority_tip` | Drawn from the crank's balance, paid to the cranker |
 
 The rent deposit scales with the scheduled instruction's size — ~0.002 SOL
 for a minimal ix, up to ~0.003 SOL with a handful of accounts and a bit of
@@ -256,12 +286,12 @@ Useful alerts:
 
 ## Instruction Reference
 
-| Disc | Name | Accounts | Data |
-|---:|---|---|---|
-| 0 | `Create` | `payer(w,s), crank(w), system_program` | schedule payload |
-| 1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar` | none |
-| 2 | `Cancel` | `authority(s), crank(w), recipient(w)` | none |
-| 3 | `Close` | `reporter(s,w), crank(w), recipient(w)` | none |
+| Disc | Name      | Accounts                                      | Data             |
+| ---: | --------- | --------------------------------------------- | ---------------- |
+|    0 | `Create`  | `payer(w,s), crank(w), system_program`        | schedule payload |
+|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar` | none             |
+|    2 | `Cancel`  | `authority(s), crank(w), recipient(w)`        | none             |
+|    3 | `Close`   | `reporter(s,w), crank(w), recipient(w)`       | none             |
 
 To add lamports to a live crank, send a plain `system_program::transfer` to
 the crank PDA — no dedicated instruction exists.

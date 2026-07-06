@@ -8,7 +8,10 @@
 
 use anchor_lang::prelude::*;
 
-use hydra_api::{cpi::native as hydra_cpi, instruction::CreateArgs};
+use hydra_api::{
+    cpi::native as hydra_cpi,
+    instruction::{CreateArgs, ScheduledIx},
+};
 
 declare_id!("Xyj597GykzwSu44muqNHtYs2aKUgm9ydNoHNySTDFs5");
 
@@ -33,9 +36,11 @@ pub mod hydra_example_anchor {
                 remaining: 10,
                 priority_tip: 1_000,
                 cu_limit: 0, // no on-chain CU override
-                scheduled_program_id: target_program_id,
-                scheduled_metas: &[],
-                scheduled_data: b"tick",
+                scheduled: &[ScheduledIx {
+                    program_id: target_program_id,
+                    metas: &[],
+                    data: b"tick",
+                }],
             },
         )
         .map_err(Into::into)

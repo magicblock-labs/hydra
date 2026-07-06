@@ -9,6 +9,10 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+custom-panic = []
+custom-heap = []
+
 [dependencies]
 hydra-api = { workspace = true, features = ["cpi-pinocchio"] }
 pinocchio = { workspace = true }
@@ -20,3 +24,8 @@ mollusk-svm = { workspace = true }
 solana-account = { workspace = true }
 solana-instruction = { workspace = true }
 solana-pubkey = { workspace = true }
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ['cfg(target_os, values("solana"))']

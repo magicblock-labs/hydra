@@ -3,18 +3,19 @@
 //! # `Create` (disc 0) — wire layout
 //!
 //! ```text
-//! seed:           [u8; 32]
-//! authority:      [u8; 32]      // all-zeros = none
-//! start_slot:     u64 LE
-//! interval_slots: u64 LE
-//! remaining:      u64 LE        // 0 on the wire = infinite
-//! priority_tip:   u64 LE
-//! cu_limit:       u32 LE        // 0 = cranker omits SetComputeUnitLimit
-//! num_accounts:   u8
-//! data_len:       u16 LE
-//! program_id:     [u8; 32]
-//! metas:          [[flag:u8][pubkey:[u8;32]]; num_accounts]
-//! data:           [u8; data_len]
+//! seed:             [u8; 32]
+//! authority:        [u8; 32]    // all-zeros = none
+//! start_slot:       u64 LE
+//! interval_slots:   u64 LE
+//! remaining:        u64 LE      // 0 on the wire = infinite
+//! priority_tip:     u64 LE
+//! cu_limit:         u32 LE      // 0 = cranker omits SetComputeUnitLimit
+//! ── one or more scheduled ixs, parsed until the data is exhausted: ──
+//!   num_accounts:   u8
+//!   data_len:       u16 LE
+//!   program_id:     [u8; 32]
+//!   metas:          [[flag:u8][pubkey:[u8;32]]; num_accounts]
+//!   data:           [u8; data_len]
 //! ```
 //!
 //! # `Trigger` (disc 1)   Accounts: `[crank(w), cranker(w,s), instructions_sysvar]`
@@ -24,18 +25,19 @@
 //! To fund a crank after creation, send a direct `system_program::transfer`
 //! to the crank PDA — no dedicated instruction is needed.
 
-/// Fixed-size prefix of `Create` data before the variable metas + data section.
+/// Fixed-size prefix of `Create` data, before variable data.
 pub const CREATE_FIXED_PREFIX_LEN: usize = 32 +  // seed
     32 +  // authority
      8 +  // start_slot
      8 +  // interval_slots
      8 +  // remaining
      8 +  // priority_tip
-     4 +  // cu_limit
-     1 +  // num_accounts
-     2 +  // data_len
-    32; // program_id
-        // = 135
+     4; // cu_limit
+        // = 100
+
+/// Per-scheduled-ix fixed header in `Create` data, before its metas + data:
+/// `num_accounts: u8`, `data_len: u16 LE`, `program_id: [u8; 32]`.
+pub const CREATE_IX_HEADER_LEN: usize = 1 + 2 + 32; // = 35
 
 // ---------------------------------------------------------------------------
 // Client builders
@@ -95,7 +97,42 @@ mod client {
         }
     }
 
+    /// One scheduled instruction template.
+    pub struct ScheduledIx<'a> {
+        pub program_id: Pubkey,
+        pub metas: &'a [SchedMeta],
+        pub data: &'a [u8],
+    }
+
     /// All the scheduling knobs for `Create`.
+    ///
+    /// # Caller responsibilities (the program does NOT check these)
+    ///
+    /// `Create` validates the wire format, the signer-flag ban, and a few
+    /// numeric bounds, but it deliberately does **not** verify that the schedule
+    /// is actually *crankable*. A schedule that violates any rule below is
+    /// accepted and stored, but every `Trigger` will fail — the crank is created
+    /// yet can never fire, stranding its rent. The client is the only party with
+    /// the full account picture, so these are its responsibility:
+    ///
+    /// 1. **Consistent writability per account.** If the same pubkey appears in
+    ///    more than one scheduled ix (or more than once in one ix), it must carry
+    ///    the *same* `is_writable` flag every time. The Solana runtime promotes an
+    ///    account to writable in *every* instruction region of the crank tx if it
+    ///    is writable in any of them; `Trigger` byte-matches the follow-up ix
+    ///    against the stored template, and a promoted `writable` flag can never
+    ///    match a stored `read-only` one.
+    ///
+    /// 2. **The crank PDA is writable.** The crank PDA is writable in
+    ///    `Trigger` itself, so the runtime promotes it to writable everywhere.
+    ///    A scheduled program should authenticate the crank by reading
+    ///    the preceding `Trigger` from the instructions sysvar instead — not by
+    ///    listing the crank PDA as one of its own accounts.
+    ///
+    /// 3. **Be careful referencing the cranker.** The cranker is the tx fee
+    ///    payer (signer + writable) and is unknown at schedule time, so any meta
+    ///    matching it is promoted and breaks the byte-match. Moreover, the cranker
+    ///    may refuse any cranks that includes its own pubkey as an account.
     pub struct CreateArgs<'a> {
         pub seed: [u8; 32],
         /// All-zeros = unkillable (no cancel authority).
@@ -109,18 +146,23 @@ mod client {
         /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
         /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
         pub cu_limit: u32,
-        pub scheduled_program_id: Pubkey,
-        pub scheduled_metas: &'a [SchedMeta],
-        pub scheduled_data: &'a [u8],
+        /// The scheduled instructions, in execution order. Must be non-empty
+        pub scheduled: &'a [ScheduledIx<'a>],
     }
 
     /// Build a `Create` instruction.
+    ///
+    /// This only serializes the wire format; it does not validate that the
+    /// schedule is crankable. See [`CreateArgs`] for the rules the caller must
+    /// uphold (consistent writability, crank/cranker metas) — a
+    /// schedule that breaks them is accepted on-chain but can never be triggered.
     pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
-        let mut data = Vec::with_capacity(
-            1 + super::CREATE_FIXED_PREFIX_LEN
-                + 33 * args.scheduled_metas.len()
-                + args.scheduled_data.len(),
-        );
+        let body_len: usize = args
+            .scheduled
+            .iter()
+            .map(|s| super::CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
+            .sum();
+        let mut data = Vec::with_capacity(1 + super::CREATE_FIXED_PREFIX_LEN + body_len);
         data.push(ix::CREATE);
         data.extend_from_slice(&args.seed);
         data.extend_from_slice(&args.authority);
@@ -129,15 +171,17 @@ mod client {
         data.extend_from_slice(&args.remaining.to_le_bytes());
         data.extend_from_slice(&args.priority_tip.to_le_bytes());
         data.extend_from_slice(&args.cu_limit.to_le_bytes());
-        data.push(args.scheduled_metas.len() as u8);
-        data.extend_from_slice(&(args.scheduled_data.len() as u16).to_le_bytes());
-        data.extend_from_slice(&args.scheduled_program_id.to_bytes());
-        for m in args.scheduled_metas {
-            let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
-            data.push(flag);
-            data.extend_from_slice(&m.pubkey.to_bytes());
+        for s in args.scheduled {
+            data.push(s.metas.len() as u8);
+            data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
+            data.extend_from_slice(&s.program_id.to_bytes());
+            for m in s.metas {
+                let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
+                data.push(flag);
+                data.extend_from_slice(&m.pubkey.to_bytes());
+            }
+            data.extend_from_slice(s.data);
         }
-        data.extend_from_slice(args.scheduled_data);
 
         Instruction {
             program_id: program_id(),
@@ -190,48 +234,64 @@ mod client {
         }
     }
 
-    /// Reconstruct the scheduled instruction from a crank's raw account bytes.
-    /// This is what an off-chain cranker does to build `ix[k+1]` for the tx.
-    pub fn scheduled_ix_from_crank(data: &[u8]) -> Option<Instruction> {
+    /// Reconstruct all scheduled instructions from a crank's raw account bytes.
+    /// This is what an off-chain cranker does to build the sibling ixs that
+    /// must follow `Trigger`.
+    pub fn scheduled_ixs_from_crank(data: &[u8]) -> Option<Vec<Instruction>> {
         use crate::consts::{CRANK_HEADER_SIZE, SERIALIZED_META_SIZE};
 
-        if data.len() < CRANK_HEADER_SIZE + 2 {
+        if data.len() < CRANK_HEADER_SIZE {
             return None;
         }
-        // Tail region starts right after the 120-byte header and is laid out
-        // in the instructions-sysvar wire format.
         let tail = &data[CRANK_HEADER_SIZE..];
-        let num_accounts = u16::from_le_bytes(tail[0..2].try_into().ok()?) as usize;
-        let metas_end = 2 + num_accounts * SERIALIZED_META_SIZE;
-        if tail.len() < metas_end + 32 + 2 {
-            return None;
-        }
-        let program_id = Pubkey::new_from_array(tail[metas_end..metas_end + 32].try_into().ok()?);
-        let data_len =
-            u16::from_le_bytes(tail[metas_end + 32..metas_end + 34].try_into().ok()?) as usize;
-        let data_start = metas_end + 34;
-        if tail.len() < data_start + data_len {
-            return None;
-        }
+        let mut out = Vec::new();
+        let mut off = 0usize;
+        while off < tail.len() {
+            // [num_accounts: u16][metas: 33*N][program_id: 32][data_len: u16][data]
+            if off + 2 > tail.len() {
+                return None;
+            }
+            let num_accounts = u16::from_le_bytes(tail[off..off + 2].try_into().ok()?) as usize;
+            let metas_start = off + 2;
+            let metas_end = metas_start + num_accounts * SERIALIZED_META_SIZE;
+            if metas_end + 32 + 2 > tail.len() {
+                return None;
+            }
+            let program_id =
+                Pubkey::new_from_array(tail[metas_end..metas_end + 32].try_into().ok()?);
+            let data_len =
+                u16::from_le_bytes(tail[metas_end + 32..metas_end + 34].try_into().ok()?) as usize;
+            let data_start = metas_end + 34;
+            let data_end = data_start + data_len;
+            if data_end > tail.len() {
+                return None;
+            }
 
-        let mut accounts = Vec::with_capacity(num_accounts);
-        for i in 0..num_accounts {
-            let base = 2 + i * SERIALIZED_META_SIZE;
-            let flag = tail[base];
-            let pk = Pubkey::new_from_array(tail[base + 1..base + 33].try_into().ok()?);
-            let is_writable = flag & META_FLAG_WRITABLE != 0;
-            accounts.push(if is_writable {
-                AccountMeta::new(pk, false)
-            } else {
-                AccountMeta::new_readonly(pk, false)
+            let mut accounts = Vec::with_capacity(num_accounts);
+            for i in 0..num_accounts {
+                let base = metas_start + i * SERIALIZED_META_SIZE;
+                let flag = tail[base];
+                let pk = Pubkey::new_from_array(tail[base + 1..base + 33].try_into().ok()?);
+                let is_writable = flag & META_FLAG_WRITABLE != 0;
+                accounts.push(if is_writable {
+                    AccountMeta::new(pk, false)
+                } else {
+                    AccountMeta::new_readonly(pk, false)
+                });
+            }
+
+            out.push(Instruction {
+                program_id,
+                accounts,
+                data: tail[data_start..data_end].to_vec(),
             });
+            off = data_end;
         }
 
-        Some(Instruction {
-            program_id,
-            accounts,
-            data: tail[data_start..data_start + data_len].to_vec(),
-        })
+        if out.is_empty() {
+            return None;
+        }
+        Some(out)
     }
 }
 
