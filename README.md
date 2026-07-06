@@ -151,8 +151,17 @@ let create = ix::create(
 
 Scheduled instructions run top-level, so a target program cannot rely on Hydra
 CPI signer privileges. If the scheduled ix needs to authenticate a Hydra crank,
-include the crank PDA and instructions sysvar in the scheduled ix and verify
-the sibling instructions in both directions.
+include the instructions sysvar in the scheduled ix and verify the sibling
+instructions in both directions.
+
+The crank PDA itself must **not** be one of the scheduled ix's accounts: it is
+writable in `Trigger`, so the runtime promotes it to writable in every ix region
+and the stored read-only/writable template could never match, leaving the crank
+un-triggerable. `Create` does *not* reject this (nor other un-crankable
+schedules) — it is the client builder's responsibility; see
+`CreateArgs` in `hydra-api::instruction` for the full list of caller rules
+(consistent writability per account, no crank/cranker metas, tx lock budget).
+The scheduled program instead learns the crank from `ix[k-1]` via the sysvar.
 
 Hydra does the forward check: `Trigger` reads the instructions sysvar and
 requires `ix[k+1]` to byte-match the scheduled ix stored in the crank PDA. The
@@ -161,16 +170,19 @@ load `ix[k-1]`, and require it to be Hydra `Trigger` for the same crank PDA.
 
 ```text
 ix[k-1] = Hydra.Trigger(crank = expected_crank_pda, ...)
-ix[k]   = your scheduled ix(crank = expected_crank_pda, instructions_sysvar, ...)
+ix[k]   = your scheduled ix(instructions_sysvar, ...)   // crank PDA not an account
 ```
 
 In the scheduled program, reject unless:
 
 - `expected_crank_pda == Pubkey::find_program_address([b"crank", seed], hydra_id)`
-- `crank.owner == hydra_id`
 - the previous ix program id is `hydra_id`
 - the previous ix discriminator is `Trigger`
 - the previous ix first account is the same crank PDA
+
+The transaction is atomic, so a successful `Trigger` at `ix[k-1]` has already
+verified the crank is Hydra-owned and due — no separate `crank.owner` check is
+needed.
 
 If the scheduled ix also needs to verify who created the schedule, read the
 crank header, for example with `hydra_api::state::load_crank`, and check both
@@ -228,6 +240,7 @@ hydra-cranker \
   --ephemeral
 
 # With Prometheus metrics at http://0.0.0.0:9100/metrics
+# and JSON health at http://0.0.0.0:9100/healthz
 hydra-cranker \
   --keypair ~/.config/solana/cranker.json \
   --prometheus-port 9100
@@ -244,25 +257,36 @@ hydra-cranker \
 ### Metrics
 
 When `--prometheus-port <PORT>` is set the cranker serves `/metrics` in
-Prometheus text format on `0.0.0.0:<PORT>`. All series are namespaced
-`hydra_cranker_*` and pre-initialised so `rate()` works from scrape 1.
+Prometheus text format and `/healthz` in JSON on `0.0.0.0:<PORT>`. All series
+are namespaced `hydra_cranker_*` and pre-initialised so `rate()` works from
+scrape 1.
 
-| Metric                     | Type      | Labels                                                            | Meaning                                                                |
-| -------------------------- | --------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `cranks_cached`            | gauge     | —                                                                 | Cranks currently in the in-memory cache.                               |
-| `current_slot`             | gauge     | —                                                                 | Last slot observed from `slotSubscribe`.                               |
-| `eligible_now`             | gauge     | —                                                                 | Cranks eligible to trigger on the last slot tick.                      |
-| `triggers_submitted_total` | counter   | `result={ok,err}`                                                 | Triggers submitted.                                                    |
-| `ws_reconnects_total`      | counter   | `source={program,slot}`                                           | WS (re)connect attempts.                                               |
-| `grpc_reconnects_total`    | counter   | `source={program,slot}`                                           | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set). |
-| `cache_events_total`       | counter   | `kind={insert,update,remove}`                                     | Cache mutations driven by `programSubscribe`.                          |
-| `sweep_duration_seconds`   | histogram | —                                                                 | Wall time per slot-tick sweep (scan + fire). Buckets target sub-10 ms. |
-| `rpc_errors_total`         | counter   | `op={get_program_accounts,get_latest_blockhash,send_transaction}` | RPC call errors, by failing operation.                                 |
+`/healthz` returns `200` while the slot stream is fresh and no eligible crank is
+parked after repeated failures. It returns `503` before the first slot, when the
+last slot sweep is older than 30 seconds, when eligible cranks are parked, or
+when triggerable cranks were not attempted on the latest sweep.
+
+| Metric                     | Type      | Labels                                                            | Meaning                                                                      |
+| -------------------------- | --------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `cranks_cached`            | gauge     | —                                                                 | Cranks currently in the in-memory cache.                                     |
+| `current_slot`             | gauge     | —                                                                 | Last slot observed from `slotSubscribe`.                                     |
+| `eligible_now`             | gauge     | —                                                                 | Cranks eligible to trigger on the last slot tick.                            |
+| `triggerable_now`          | gauge     | —                                                                 | Eligible cranks after local cooldown/backoff filtering.                      |
+| `parked_now`               | gauge     | —                                                                 | Eligible cranks parked after repeated failures at the same `next_exec_slot`. |
+| `max_overdue_slots`        | gauge     | —                                                                 | Largest `current_slot - next_exec_slot` among currently eligible cranks.     |
+| `triggers_submitted_total` | counter   | `result={ok,err}`                                                 | Triggers submitted.                                                          |
+| `closes_submitted_total`   | counter   | `result={ok,err}`                                                 | Permissionless `Close` transactions submitted.                               |
+| `ws_reconnects_total`      | counter   | `source={program,slot}`                                           | WS (re)connect attempts.                                                     |
+| `grpc_reconnects_total`    | counter   | `source={program,slot}`                                           | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set).       |
+| `cache_events_total`       | counter   | `kind={insert,update,remove}`                                     | Cache mutations driven by `programSubscribe`.                                |
+| `sweep_duration_seconds`   | histogram | —                                                                 | Wall time per slot-tick sweep (scan + fire). Buckets target sub-10 ms.       |
+| `rpc_errors_total`         | counter   | `op={get_program_accounts,get_latest_blockhash,send_transaction}` | RPC call errors, by failing operation.                                       |
 
 Useful alerts:
 
 - `increase(hydra_cranker_current_slot[1m]) < 100` — WS wedged.
 - `hydra_cranker_cranks_cached == 0` and `hydra_cranker_ws_reconnects_total > 2` — not subscribed / flaky endpoint.
+- `hydra_cranker_parked_now > 0` — at least one eligible crank repeatedly failed and is no longer being retried.
 - `rate(hydra_cranker_triggers_submitted_total{result="err"}[5m]) / rate(hydra_cranker_triggers_submitted_total[5m]) > 0.5` — majority of triggers failing.
 - `hydra_cranker_eligible_now > 0` for >30 s with no `rate(triggers_submitted_total[1m])` — have work, not doing it.
 - `histogram_quantile(0.99, rate(hydra_cranker_sweep_duration_seconds_bucket[5m])) > 0.05` — sweep p99 > 50 ms, perf regression or cache bloat.
@@ -344,10 +368,10 @@ Same discriminators as the base program (`0–3`); the account shapes differ
 because creation/close go through the Magic program rather than the System
 program.
 
-| Disc | Name      | Accounts                                                         | Data             |
-| ---: | --------- | ---------------------------------------------------------------- | ---------------- |
-|    0 | `Create`  | `sponsor(w,s), crank(w), vault(w), magic_program`                | schedule payload |
-|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar`                    | none             |
+| Disc | Name      | Accounts                                                          | Data             |
+| ---: | --------- | ----------------------------------------------------------------- | ---------------- |
+|    0 | `Create`  | `sponsor(w,s), crank(w), vault(w), magic_program`                 | schedule payload |
+|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar`                     | none             |
 |    2 | `Cancel`  | `authority(w,s), crank(w), recipient(w), vault(w), magic_program` | none             |
 |    3 | `Close`   | `reporter(w,s), crank(w), recipient(w), vault(w), magic_program`  | none             |
 
