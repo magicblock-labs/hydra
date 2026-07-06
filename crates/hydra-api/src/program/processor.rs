@@ -65,8 +65,11 @@ pub fn require_cancel_authority(
 }
 
 /// The fixed-size scheduling prefix of a `Create` / `CreateEphemeral` payload.
-/// `next_exec` / `interval` are slots for base-layer cranks and milliseconds for
-/// ephemeral-rollup cranks; the bytes are identical either way.
+/// `next_exec` / `interval` are slot counts on both ledgers — base-layer slots
+/// for base cranks, ephemeral-rollup slots for ephemeral cranks (the ER runs
+/// faster, so the same wall-clock interval is more slots). Both `Trigger`
+/// handlers compare against the ledger's own clock slot and advance
+/// `next_exec_slot` by `interval_slots`; the wire bytes are identical either way.
 pub struct CreateHeader {
     pub seed: [u8; 32],
     pub authority: [u8; 32],
