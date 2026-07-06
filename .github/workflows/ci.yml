@@ -67,6 +67,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Check — anchor example
+        run: cargo check --manifest-path examples/anchor/Cargo.toml --all-targets
+
       - name: Build on-chain programs
         run: |
           cargo build-sbf --manifest-path programs/hydra/Cargo.toml

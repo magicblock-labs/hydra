@@ -36,7 +36,7 @@ const HYDRA_SO: &str = concat!(
 );
 
 fn hydra_id() -> Pubkey {
-    Pubkey::new_from_array(hydra_api::ID.to_bytes())
+    Pubkey::new_from_array(hydra_api::base::ID.to_bytes())
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn schedule_creates_crank_via_cpi_into_hydra() {
 
     // Derive the crank PDA the example will create.
     let seed = [0x11u8; 32];
-    let (crank_addr, _bump) = hydra_api::state::find_crank_pda(&seed);
+    let (crank_addr, _bump) = hydra_api::state::find_base_crank_pda(&seed);
     let crank = Pubkey::new_from_array(crank_addr.to_bytes());
     let payer = Pubkey::new_unique();
     let target_program_id = Pubkey::new_unique();
