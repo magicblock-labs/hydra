@@ -13,7 +13,7 @@ use pinocchio::{
 };
 
 use hydra_api::{
-    consts::{CRANKER_REWARD, REMAINING_INFINITE},
+    consts::{ephemeral, REMAINING_INFINITE},
     program::{
         helpers::{get_clock_slot, get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
         processor::verify_followup,
@@ -62,8 +62,9 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
         return Err(HydraError::Exhausted.into());
     }
 
-    // Cranker reward, paid out of the crank's balance — same as base `Trigger`.
-    let reward = CRANKER_REWARD
+    // Cranker reward, paid out of the crank's balance — same as base `Trigger`,
+    // but at the ephemeral-rollup rate.
+    let reward = ephemeral::CRANKER_REWARD
         .checked_add(priority_tip)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     let new_crank_lamports = crank_ai

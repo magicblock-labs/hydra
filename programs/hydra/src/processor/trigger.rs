@@ -11,7 +11,7 @@ use pinocchio::{
 };
 
 use hydra_api::{
-    consts::{CRANKER_REWARD, CRANK_HEADER_SIZE, REMAINING_INFINITE},
+    consts::{base, CRANK_HEADER_SIZE, REMAINING_INFINITE},
     HydraError,
 };
 
@@ -77,7 +77,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
         return Err(HydraError::Exhausted.into());
     }
 
-    let reward = CRANKER_REWARD
+    let reward = base::CRANKER_REWARD
         .checked_add(hdr.priority_tip)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     let new_crank_lamports = crank_ai

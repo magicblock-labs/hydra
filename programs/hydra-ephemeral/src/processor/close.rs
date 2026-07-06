@@ -24,7 +24,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     check_magic_accounts(vault, magic_program)?;
 
     // Base-identical payout: closable check + bounty/refund split, zeroes crank.
-    process_close(reporter, crank_ai, recipient, &crate::ID)?;
+    process_close(reporter, crank_ai, recipient, &crate::ID, false)?;
 
     // Deallocate the now zero-lamport ephemeral account; Magic refunds the vault
     // rent to `reporter`.

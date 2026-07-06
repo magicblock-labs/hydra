@@ -279,9 +279,9 @@ fn main() -> Result<()> {
             let mut elig = Vec::new();
             let mut clos = Vec::new();
             for entry in guard.values() {
-                if entry.is_closable(slot) {
+                if entry.is_closable(slot, args.ephemeral) {
                     clos.push(entry.clone());
-                } else if entry.is_eligible(slot) {
+                } else if entry.is_eligible(slot, args.ephemeral) {
                     // A crank that references the cranker's own pubkey can never
                     // fire (the cranker is promoted to signer + writable as the
                     // fee payer) and is unsafe to run — skip unless `--unsafe`.

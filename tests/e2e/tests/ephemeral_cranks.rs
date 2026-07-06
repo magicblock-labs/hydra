@@ -59,12 +59,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::RecvTimeoutError;
+use hydra_api::consts::ephemeral::CRANKER_REWARD;
 use hydra_api::instruction::{self as ix, ScheduledIx};
 use hydra_api::instruction::{
     ephemeral::{self as eph},
     CreateArgs,
 };
-use hydra_api::CRANKER_REWARD;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::{AccountMeta, Instruction};

@@ -8,24 +8,14 @@ use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
 use crate::{
     consts::{
-        CRANKER_REWARD, CRANK_SEED_PREFIX, MAX_ACCOUNTS, MAX_COMPUTE_UNIT_LIMIT, MAX_DATA_LEN,
+        self, CRANK_SEED_PREFIX, MAX_ACCOUNTS, MAX_COMPUTE_UNIT_LIMIT, MAX_DATA_LEN,
         MAX_INSTRUCTIONS, META_FLAG_SIGNER, REMAINING_INFINITE, SERIALIZED_META_SIZE,
-        STALENESS_THRESHOLD_SLOTS,
     },
     instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN},
     program::helpers::get_clock_slot,
     state::{load_crank, load_crank_mut, Crank},
-    HydraError, CRANK_HEADER_SIZE, MAX_TX_ACCOUNT_LOCKS, META_FLAG_WRITABLE,
+    HydraError, CRANK_HEADER_SIZE,
 };
-
-/// Per-unique-account writability state used by the conflict scan in `process`.
-/// `Unknown` fills the unused slots of the fixed tracking buffer.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Writability {
-    Unknown,
-    ReadOnly,
-    Writable,
-}
 
 /// `signer` must sign and `crank` must be Hydra-owned — the preamble of every
 /// `Cancel` / `Close` path.
@@ -243,15 +233,6 @@ pub fn write_tail(tail: &mut [u8], data: &[u8]) -> Result<usize, ProgramError> {
     let mut off = 0usize;
     let mut num_instructions = 0usize;
 
-    // Writability-conflict tracker. Each distinct scheduled account is
-    // recorded once, keyed by the offset of its pubkey within `data` (so we
-    // store 4 bytes, not a 32-byte key), alongside the read/write state it
-    // was first seen with. On a later occurrence with the opposite state we
-    // reject.
-    let mut seen_pubkey_offsets = [0u32; MAX_TX_ACCOUNT_LOCKS];
-    let mut seen_writability = [Writability::Unknown; MAX_TX_ACCOUNT_LOCKS];
-    let mut num_distinct_accounts = 0usize;
-
     while cursor < data.len() {
         let (num_accounts, data_len, next) = parse_ix_header(data, cursor)?;
         num_instructions += 1;
@@ -269,34 +250,6 @@ pub fn write_tail(tail: &mut [u8], data: &[u8]) -> Result<usize, ProgramError> {
             let meta_flag = data[meta_offset];
             if meta_flag & META_FLAG_SIGNER != 0 {
                 return Err(HydraError::SignerInScheduledIx.into());
-            }
-            let meta_writability = if meta_flag & META_FLAG_WRITABLE != 0 {
-                Writability::Writable
-            } else {
-                Writability::ReadOnly
-            };
-            let pubkey_offset = meta_offset + 1;
-            let meta_pubkey = &data[pubkey_offset..pubkey_offset + 32];
-            let mut already_seen = false;
-            for seen_index in 0..num_distinct_accounts {
-                let seen_offset = seen_pubkey_offsets[seen_index] as usize;
-                if data[seen_offset..seen_offset + 32] == *meta_pubkey {
-                    if seen_writability[seen_index] != meta_writability {
-                        return Err(HydraError::ConflictingAccountWritability.into());
-                    }
-                    already_seen = true;
-                    break;
-                }
-            }
-            if !already_seen {
-                // A distinct account that can't fit in a `Trigger` tx's lock
-                // set makes the whole crank un-triggerable.
-                if num_distinct_accounts == MAX_TX_ACCOUNT_LOCKS {
-                    return Err(HydraError::InvalidSchedule.into());
-                }
-                seen_pubkey_offsets[num_distinct_accounts] = pubkey_offset as u32;
-                seen_writability[num_distinct_accounts] = meta_writability;
-                num_distinct_accounts += 1;
             }
         }
 
@@ -457,7 +410,19 @@ pub fn process_close(
     crank_ai: &AccountView,
     recipient: &AccountView,
     program_id: &Address,
+    is_ephemeral: bool,
 ) -> ProgramResult {
+    let cranker_reward = if is_ephemeral {
+        consts::ephemeral::CRANKER_REWARD
+    } else {
+        consts::base::CRANKER_REWARD
+    };
+    let staleness_threshold_slots = if is_ephemeral {
+        consts::ephemeral::STALENESS_THRESHOLD_SLOTS
+    } else {
+        consts::base::STALENESS_THRESHOLD_SLOTS
+    };
+
     require_signed_crank(reporter, crank_ai, program_id)?;
 
     // Snapshot the fields we need from the crank header.
@@ -476,7 +441,7 @@ pub fn process_close(
 
     // Pre-condition: exhausted OR underfunded OR stuck.
     let exhausted = remaining == 0;
-    let next_reward = CRANKER_REWARD
+    let next_reward = cranker_reward
         .checked_add(priority_tip)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     let underfunded = lamports_now
@@ -487,7 +452,7 @@ pub fn process_close(
     // failure pins it in the past. `saturating_sub` makes future-scheduled
     // cranks (`next_exec_slot > current_slot`) trivially not-stale.
     let current_slot = get_clock_slot()?;
-    let stuck = current_slot.saturating_sub(next_exec_slot) > STALENESS_THRESHOLD_SLOTS;
+    let stuck = current_slot.saturating_sub(next_exec_slot) > staleness_threshold_slots;
 
     if !(exhausted || underfunded || stuck) {
         return Err(HydraError::NotClosable.into());
@@ -498,7 +463,7 @@ pub fn process_close(
     // Flat bounty (2 × base fee) to whoever cranked the cleanup; the balance
     // refunds to `recipient`. `min` handles a crank holding less than the
     // bounty — reporter gets what's there, recipient gets nothing.
-    let bounty = CRANKER_REWARD.min(lamports_now);
+    let bounty = cranker_reward.min(lamports_now);
     let refund = lamports_now - bounty;
 
     crank_ai.set_lamports(0);

@@ -11,7 +11,7 @@ use std::{
 use solana_pubkey::Pubkey;
 
 use hydra_api::{
-    consts::{CRANKER_REWARD, CRANK_HEADER_SIZE, REMAINING_INFINITE, STALENESS_THRESHOLD_SLOTS},
+    consts::{self, CRANK_HEADER_SIZE, REMAINING_INFINITE},
     SERIALIZED_META_SIZE,
 };
 
@@ -36,6 +36,22 @@ pub struct CrankEntry {
     /// `0` = cranker omits `SetComputeUnitLimit`.
     pub cu_limit: u32,
     pub data: Vec<u8>,
+}
+
+fn cranker_reward(is_ephemeral: bool) -> u64 {
+    if is_ephemeral {
+        consts::ephemeral::CRANKER_REWARD
+    } else {
+        consts::base::CRANKER_REWARD
+    }
+}
+
+fn staleness_threshold_slots(is_ephemeral: bool) -> u64 {
+    if is_ephemeral {
+        consts::ephemeral::STALENESS_THRESHOLD_SLOTS
+    } else {
+        consts::base::STALENESS_THRESHOLD_SLOTS
+    }
 }
 
 impl CrankEntry {
@@ -68,14 +84,14 @@ impl CrankEntry {
 
     /// Mirrors Hydra's on-chain Trigger pre-flight: slot reached, not
     /// exhausted, enough lamports to cover reward + tip above the rent floor.
-    pub fn is_eligible(&self, current_slot: u64) -> bool {
+    pub fn is_eligible(&self, current_slot: u64, is_ephemeral: bool) -> bool {
         if current_slot < self.next_exec_slot {
             return false;
         }
         if self.remaining == 0 {
             return false;
         }
-        let reward = CRANKER_REWARD.saturating_add(self.priority_tip);
+        let reward = cranker_reward(is_ephemeral).saturating_add(self.priority_tip);
         self.lamports >= self.rent_min.saturating_add(reward)
     }
 
@@ -125,16 +141,16 @@ impl CrankEntry {
 
     /// Mirrors on-chain `Close` pre-condition: exhausted OR underfunded OR
     /// stuck (`current_slot - next_exec_slot > STALENESS_THRESHOLD_SLOTS`).
-    pub fn is_closable(&self, current_slot: u64) -> bool {
+    pub fn is_closable(&self, current_slot: u64, is_ephemeral: bool) -> bool {
         if self.remaining == 0 {
             return true;
         }
-        let next_reward = CRANKER_REWARD.saturating_add(self.priority_tip);
+        let next_reward = cranker_reward(is_ephemeral).saturating_add(self.priority_tip);
         if self.lamports < self.rent_min.saturating_add(next_reward) {
             return true;
         }
         // `saturating_sub` keeps future-scheduled cranks trivially not stale.
-        current_slot.saturating_sub(self.next_exec_slot) > STALENESS_THRESHOLD_SLOTS
+        current_slot.saturating_sub(self.next_exec_slot) > staleness_threshold_slots(is_ephemeral)
     }
 }
 

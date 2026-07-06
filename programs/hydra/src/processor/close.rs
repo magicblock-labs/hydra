@@ -16,5 +16,5 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    process_close(reporter, crank_ai, recipient, &crate::ID)
+    process_close(reporter, crank_ai, recipient, &crate::ID, false)
 }

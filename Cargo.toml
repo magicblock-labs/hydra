@@ -60,5 +60,4 @@ overflow-checks = true
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(target_os, values("solana"))',
-    'cfg(feature, values("create-account-allow-prefund", "custom-alloc", "custom-panic", "no-entrypoint", "logging", "ephemeral", "program"))',
 ] }
