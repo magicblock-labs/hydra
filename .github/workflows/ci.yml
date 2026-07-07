@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Pin to the version the test was developed against.
-      EPHEMERAL_VALIDATOR_VERSION: 0.12.3
+      EPHEMERAL_VALIDATOR_VERSION: 0.13.3
     steps:
       - uses: actions/checkout@v4
 
