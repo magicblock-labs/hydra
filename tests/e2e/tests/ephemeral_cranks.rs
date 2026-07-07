@@ -86,6 +86,11 @@ const BASE_WS_PORT: u16 = BASE_RPC_PORT + 1;
 /// which is exactly what the cranker's `http→ws` URL derivation assumes.
 const ER_RPC_PORT: u16 = 7799;
 
+/// CI runs these ignored tests back-to-back on fixed ports. If a validator
+/// wrapper leaves its real child outside our process group, sweep only these
+/// e2e process names before the next scenario starts.
+const STACK_PROCESS_PATTERN: &str = "[m]b-test-validator|[e]phemeral-validator|[h]ydra-cranker";
+
 /// The bundled noop program — its on-chain address is its build keypair's
 /// pubkey (`target/deploy/hydra_noop-keypair.json`). Scheduled cranks point at
 /// it; it ignores its accounts and data.
@@ -152,7 +157,8 @@ fn cranker_catches_cranks_created_after_start() {
 
 fn run_scenario(order: CreateOrder) {
     let _guard = STACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    assert_ports_free().expect("e2e ports available");
+    cleanup_leftover_stack_processes();
+    wait_for_ports_free(Duration::from_secs(5)).expect("e2e ports available");
     let tmp = TempDir::new().expect("temp dir");
     let mut stack = Stack {
         children: Vec::new(),
@@ -168,6 +174,8 @@ fn run_scenario(order: CreateOrder) {
     // Tear the stack down (and delete the temp dir) *before* asserting, so a
     // panic never leaks child processes.
     drop(stack);
+    cleanup_leftover_stack_processes();
+    wait_for_ports_free(Duration::from_secs(5)).expect("e2e ports released");
     result.expect("e2e ephemeral crank test");
 }
 
@@ -350,6 +358,35 @@ fn assert_ports_free() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn wait_for_ports_free(timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match assert_ports_free() {
+            Ok(()) => return Ok(()),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn cleanup_leftover_stack_processes() {
+    if std::env::var_os("CI").is_none() {
+        return;
+    }
+
+    signal_stack_processes("-INT");
+    thread::sleep(Duration::from_millis(500));
+    signal_stack_processes("-KILL");
+}
+
+fn signal_stack_processes(signal: &str) {
+    let _ = Command::new("pkill")
+        .args([signal, "-f", STACK_PROCESS_PATTERN])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Create `NUM_CRANKS` cranks on the rollup in parallel, asserting each materialized.
