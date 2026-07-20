@@ -11,11 +11,13 @@
 //!
 //! Both threads auto-reconnect on disconnect with a fixed 5 s backoff.
 //! On reconnect the cache is re-bootstrapped via `getProgramAccounts` so
-//! we don't silently drift. The slot watcher additionally treats prolonged
-//! silence as a disconnect: slots flow constantly on a healthy cluster, so
-//! a quiet stream means the socket died without a close frame (half-open
-//! connection) and must be torn down. The program watcher cannot do the
-//! same — an idle program is indistinguishable from a dead socket there.
+//! we don't silently drift. The slot watcher additionally treats a degraded
+//! stream as a disconnect: slots flow constantly on a healthy cluster, so a
+//! quiet stream means the socket died without a close frame (half-open
+//! connection), and a stream whose slots trail an HTTP `getSlot` means the
+//! connection is throttled and replaying the past. Both are torn down for
+//! reconnect. The program watcher cannot do the same — an idle program is
+//! indistinguishable from a dead socket there.
 
 use std::{
     sync::{
@@ -180,6 +182,7 @@ pub(crate) fn record_outcome(cache: &Cache, pk: Pubkey, outcome: CacheOutcome) {
 /// each new slot the RPC node observes. Reconnect loop mirrors the program
 /// watcher.
 pub fn spawn_slot_watcher(
+    rpc_url: String,
     ws_url: String,
     shutdown: Arc<AtomicBool>,
     tick: mpsc::Sender<u64>,
@@ -190,7 +193,11 @@ pub fn spawn_slot_watcher(
                 .ws_reconnects_total
                 .with_label_values(&["slot"])
                 .inc();
-            if let Err(e) = run_slot_watch(&ws_url, &shutdown, &tick) {
+            // Fresh handle each attempt in case the previous one is wedged.
+            // Short timeout: the lag check runs inline in the watch loop, and
+            // a slow HTTP endpoint must never hold up slot tick forwarding.
+            let rpc = RpcClient::new_with_timeout(rpc_url.clone(), LAG_CHECK_RPC_TIMEOUT);
+            if let Err(e) = run_slot_watch(&ws_url, &rpc, &shutdown, &tick) {
                 log::warn!("slotSubscribe loop ended: {:#}; reconnecting in 5s", e);
                 thread::sleep(Duration::from_secs(5));
             }
@@ -204,10 +211,27 @@ pub fn spawn_slot_watcher(
 /// rebuild it.
 const SLOT_SILENCE_LIMIT: Duration = Duration::from_secs(30);
 
-fn run_slot_watch(ws_url: &str, shutdown: &AtomicBool, tick: &mpsc::Sender<u64>) -> Result<()> {
+/// A degraded connection can also keep delivering *stale* slots at a trickle,
+/// which resets the silence timer while the stream falls ever further behind
+/// the chain — and cranks whose `start_slot` is past the stream's horizon
+/// never become eligible. Cross-check against an HTTP `getSlot` this often
+/// and bail once the stream lags by more than [`MAX_SLOT_LAG`] (~1 min of
+/// chain time).
+const LAG_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_SLOT_LAG: u64 = 150;
+const LAG_CHECK_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn run_slot_watch(
+    ws_url: &str,
+    rpc: &RpcClient,
+    shutdown: &AtomicBool,
+    tick: &mpsc::Sender<u64>,
+) -> Result<()> {
     let (_sub, rx) = PubsubClient::slot_subscribe(ws_url).context("slotSubscribe connect")?;
     log::info!("slotSubscribe connected");
     let mut last_slot_at = Instant::now();
+    let mut last_ws_slot: Option<u64> = None;
+    let mut last_lag_check = Instant::now();
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break Ok(());
@@ -215,6 +239,7 @@ fn run_slot_watch(ws_url: &str, shutdown: &AtomicBool, tick: &mpsc::Sender<u64>)
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(info) => {
                 last_slot_at = Instant::now();
+                last_ws_slot = Some(info.slot);
                 // If the receiver went away, we have nothing to do.
                 if tick.send(info.slot).is_err() {
                     break Ok(());
@@ -230,6 +255,33 @@ fn run_slot_watch(ws_url: &str, shutdown: &AtomicBool, tick: &mpsc::Sender<u64>)
             }
             Err(RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("slotSubscribe channel disconnected")
+            }
+        }
+        if let Some(ws_slot) = last_ws_slot {
+            if last_lag_check.elapsed() >= LAG_CHECK_INTERVAL {
+                match rpc.get_slot_with_commitment(CommitmentConfig::processed()) {
+                    Ok(rpc_slot) if rpc_slot > ws_slot + MAX_SLOT_LAG => {
+                        anyhow::bail!(
+                            "slot stream lagging: ws={ws_slot} rpc={rpc_slot} \
+                             ({} slots behind)",
+                            rpc_slot - ws_slot
+                        );
+                    }
+                    Ok(_) => {}
+                    // A failed cross-check is not proof the stream is bad;
+                    // the silence limit still guards a fully dead connection.
+                    Err(e) => {
+                        metrics::metrics()
+                            .rpc_errors_total
+                            .with_label_values(&["get_slot"])
+                            .inc();
+                        log::debug!("slot lag check skipped: {e}");
+                    }
+                }
+                // Stamp after the attempt: a slow `getSlot` must not leave
+                // the timer already expired, or the loop would re-enter the
+                // blocking call after forwarding a single queued slot.
+                last_lag_check = Instant::now();
             }
         }
     }

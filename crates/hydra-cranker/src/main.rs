@@ -202,7 +202,12 @@ fn main() -> Result<()> {
         cache.clone(),
         shutdown.clone(),
     );
-    let _slot_thread = watch::spawn_slot_watcher(ws_url, shutdown.clone(), slot_tx.clone());
+    let _slot_thread = watch::spawn_slot_watcher(
+        args.rpc_url.clone(),
+        ws_url,
+        shutdown.clone(),
+        slot_tx.clone(),
+    );
 
     // Optional Yellowstone gRPC source. Strictly additive — feeds the same
     // cache and slot channel as the WS watchers, so whichever delivers an
