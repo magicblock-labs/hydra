@@ -11,7 +11,11 @@
 //!
 //! Both threads auto-reconnect on disconnect with a fixed 5 s backoff.
 //! On reconnect the cache is re-bootstrapped via `getProgramAccounts` so
-//! we don't silently drift.
+//! we don't silently drift. The slot watcher additionally treats prolonged
+//! silence as a disconnect: slots flow constantly on a healthy cluster, so
+//! a quiet stream means the socket died without a close frame (half-open
+//! connection) and must be torn down. The program watcher cannot do the
+//! same — an idle program is indistinguishable from a dead socket there.
 
 use std::{
     sync::{
@@ -19,7 +23,7 @@ use std::{
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::RecvTimeoutError;
@@ -194,21 +198,36 @@ pub fn spawn_slot_watcher(
     })
 }
 
+/// A healthy cluster emits a slot roughly every 400 ms. If the subscription
+/// stays silent this long, the connection died without a close frame and the
+/// channel will never report `Disconnected`; bail so the reconnect loop can
+/// rebuild it.
+const SLOT_SILENCE_LIMIT: Duration = Duration::from_secs(30);
+
 fn run_slot_watch(ws_url: &str, shutdown: &AtomicBool, tick: &mpsc::Sender<u64>) -> Result<()> {
     let (_sub, rx) = PubsubClient::slot_subscribe(ws_url).context("slotSubscribe connect")?;
     log::info!("slotSubscribe connected");
+    let mut last_slot_at = Instant::now();
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break Ok(());
         }
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(info) => {
+                last_slot_at = Instant::now();
                 // If the receiver went away, we have nothing to do.
                 if tick.send(info.slot).is_err() {
                     break Ok(());
                 }
             }
-            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Timeout) => {
+                let silent = last_slot_at.elapsed();
+                if silent >= SLOT_SILENCE_LIMIT {
+                    anyhow::bail!(
+                        "no slot notification in {silent:?}; connection presumed half-open"
+                    );
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("slotSubscribe channel disconnected")
             }
