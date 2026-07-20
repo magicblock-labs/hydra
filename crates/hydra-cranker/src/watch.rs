@@ -194,7 +194,9 @@ pub fn spawn_slot_watcher(
                 .with_label_values(&["slot"])
                 .inc();
             // Fresh handle each attempt in case the previous one is wedged.
-            let rpc = RpcClient::new(rpc_url.clone());
+            // Short timeout: the lag check runs inline in the watch loop, and
+            // a slow HTTP endpoint must never hold up slot tick forwarding.
+            let rpc = RpcClient::new_with_timeout(rpc_url.clone(), LAG_CHECK_RPC_TIMEOUT);
             if let Err(e) = run_slot_watch(&ws_url, &rpc, &shutdown, &tick) {
                 log::warn!("slotSubscribe loop ended: {:#}; reconnecting in 5s", e);
                 thread::sleep(Duration::from_secs(5));
@@ -217,6 +219,7 @@ const SLOT_SILENCE_LIMIT: Duration = Duration::from_secs(30);
 /// chain time).
 const LAG_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_SLOT_LAG: u64 = 150;
+const LAG_CHECK_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn run_slot_watch(
     ws_url: &str,
@@ -256,7 +259,6 @@ fn run_slot_watch(
         }
         if let Some(ws_slot) = last_ws_slot {
             if last_lag_check.elapsed() >= LAG_CHECK_INTERVAL {
-                last_lag_check = Instant::now();
                 match rpc.get_slot_with_commitment(CommitmentConfig::processed()) {
                     Ok(rpc_slot) if rpc_slot > ws_slot + MAX_SLOT_LAG => {
                         anyhow::bail!(
@@ -276,6 +278,10 @@ fn run_slot_watch(
                         log::debug!("slot lag check skipped: {e}");
                     }
                 }
+                // Stamp after the attempt: a slow `getSlot` must not leave
+                // the timer already expired, or the loop would re-enter the
+                // blocking call after forwarding a single queued slot.
+                last_lag_check = Instant::now();
             }
         }
     }
