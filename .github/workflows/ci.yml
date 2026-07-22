@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Pinned Solana/Agave toolchain that ships `cargo build-sbf`.
+  SOLANA_VERSION: stable
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Formatting — covers all root workspace members, including `tests/e2e`.
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (rustfmt)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: rustfmt
+
+      - name: Check formatting
+        run: make fmt-check
+
+  # ---------------------------------------------------------------------------
+  # Default feature set: lint + tests with the `ephemeral` feature OFF.
+  # ---------------------------------------------------------------------------
+  default:
+    name: lint + test (default)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (clippy)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: clippy,rustfmt
+
+      - name: Install Solana toolchain (build-sbf)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Default CI checks
+        run: make ci
+
+  # ---------------------------------------------------------------------------
+  # Live end-to-end: boots the real three-process stack (mb-test-validator +
+  # ephemeral-validator + hydra-cranker) and asserts ephemeral cranks fire on
+  # schedule. The validators ship as the `@magicblock-labs/ephemeral-validator`
+  # npm package (mb-test-validator wraps `solana-test-validator`, which the Anza
+  # toolchain provides). The `tests/e2e` crate is its own `[workspace]`.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: e2e (ephemeral cranks, live validators)
+    runs-on: ubuntu-latest
+    env:
+      # Pin to the version the test was developed against.
+      EPHEMERAL_VALIDATOR_VERSION: 0.13.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (clippy)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: clippy
+
+      - name: Install Solana toolchain (build-sbf + solana-test-validator)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install MagicBlock validators (mb-test-validator + ephemeral-validator)
+        run: |
+          npm install -g "@magicblock-labs/ephemeral-validator@${EPHEMERAL_VALIDATOR_VERSION}"
+          mb-test-validator --version
+          ephemeral-validator --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tests/e2e
+
+      - name: Clippy — e2e crate
+        run: make lint-e2e
+
+      - name: Test — live ephemeral cranks
+        run: |
+          sudo prlimit --pid $$ --nofile=1048576:1048576
+          sudo sysctl fs.inotify.max_user_instances=1280
+          sudo sysctl fs.inotify.max_user_watches=655360
+          make test-e2e

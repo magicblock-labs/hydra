@@ -1,9 +1,9 @@
 [package]
-name = "hydra"
+name = "hydra-ephemeral"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hydra — permissionless Solana crank"
+description = "Hydra — permissionless crank for MagicBlock ephemeral rollups"
 
 [lib]
 crate-type = ["cdylib"]
@@ -16,23 +16,18 @@ logging = []
 # Skip the on-chain entrypoint when this crate is consumed as a library
 # (e.g. by integration tests that already loaded the .so separately).
 no-entrypoint = []
-# Emits `sol_log_compute_units` checkpoints through the Trigger hot path.
-# Each checkpoint costs ~110 CU, so the visible Trigger CU ~doubles — only
-# enable when profiling.
-cu-trace = []
 
 [dependencies]
-# `unsafe-account-resize` lets `Create` shrink the crank account from its O(1)
-# over-provisioned size down to the exact tail length (a length-only update,
-# no syscall), so the scheduled ixs are parsed in a single pass.
 pinocchio = { workspace = true }
-pinocchio-system = { workspace = true }
 pinocchio-log = { workspace = true }
+# CPI helpers for MagicBlock ephemeral accounts — the funding model that
+# distinguishes this program from the base-layer `hydra` crate.
+ephemeral-rollups-pinocchio = { workspace = true }
 solana-define-syscall = { workspace = true }
 hydra-api = { workspace = true, features = ["program"] }
 
 [package.metadata.solana]
-program-id = "Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea"
+program-id = "eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf"
 
 [lints]
 workspace = true

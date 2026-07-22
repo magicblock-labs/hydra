@@ -1,4 +1,4 @@
-/target
+target/
 # Anchor example is its own workspace with its own target dir.
 /examples/anchor/target
 Cargo.lock

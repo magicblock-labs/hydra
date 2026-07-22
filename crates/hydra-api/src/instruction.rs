@@ -39,6 +39,147 @@ pub const CREATE_FIXED_PREFIX_LEN: usize = 32 +  // seed
 /// `num_accounts: u8`, `data_len: u16 LE`, `program_id: [u8; 32]`.
 pub const CREATE_IX_HEADER_LEN: usize = 1 + 2 + 32; // = 35
 
+/// A scheduled-ix meta as it will be stored on-chain.
+///
+/// `is_signer` is intentionally absent: scheduled ixs cannot carry
+/// signer flags (enforced by `Create`), and the on-chain template
+/// stores only the writable bit anyway.
+#[derive(Clone, Copy)]
+pub struct SchedMeta {
+    pub pubkey: [u8; 32],
+    pub is_writable: bool,
+}
+
+impl SchedMeta {
+    pub fn readonly(pubkey: [u8; 32]) -> Self {
+        Self {
+            pubkey,
+            is_writable: false,
+        }
+    }
+    pub fn writable(pubkey: [u8; 32]) -> Self {
+        Self {
+            pubkey,
+            is_writable: true,
+        }
+    }
+}
+
+/// One scheduled instruction template.
+pub struct ScheduledIx<'a> {
+    pub program_id: [u8; 32],
+    pub metas: &'a [SchedMeta],
+    pub data: &'a [u8],
+}
+
+/// All the scheduling knobs for `Create`.
+///
+/// # Caller responsibilities (the program does NOT check these)
+///
+/// `Create` validates the wire format, the signer-flag ban, and a few
+/// numeric bounds, but it deliberately does **not** verify that the schedule
+/// is actually *crankable*. A schedule that violates any rule below is
+/// accepted and stored, but every `Trigger` will fail — the crank is created
+/// yet can never fire, stranding its rent. The client is the only party with
+/// the full account picture, so these are its responsibility:
+///
+/// 1. **Consistent writability per account.** If the same pubkey appears in
+///    more than one scheduled ix (or more than once in one ix), it must carry
+///    the *same* `is_writable` flag every time. The Solana runtime promotes an
+///    account to writable in *every* instruction region of the crank tx if it
+///    is writable in any of them; `Trigger` byte-matches the follow-up ix
+///    against the stored template, and a promoted `writable` flag can never
+///    match a stored `read-only` one.
+///
+/// 2. **The crank PDA is writable.** The crank PDA is writable in
+///    `Trigger` itself, so the runtime promotes it to writable everywhere.
+///    A scheduled program should authenticate the crank by reading
+///    the preceding `Trigger` from the instructions sysvar instead — not by
+///    listing the crank PDA as one of its own accounts.
+///
+/// 3. **Be careful referencing the cranker.** The cranker is the tx fee
+///    payer (signer + writable) and is unknown at schedule time, so any meta
+///    matching it is promoted and breaks the byte-match. Moreover, the cranker
+///    may refuse any cranks that includes its own pubkey as an account.
+pub struct CreateArgs<'a> {
+    pub seed: [u8; 32],
+    /// All-zeros = unkillable (no cancel authority).
+    pub authority: [u8; 32],
+    pub start_slot: u64,
+    pub interval_slots: u64,
+    /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
+    pub remaining: u64,
+    pub priority_tip: u64,
+    /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
+    /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
+    /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
+    pub cu_limit: u32,
+    /// The scheduled instructions, in execution order. Must be non-empty
+    pub scheduled: &'a [ScheduledIx<'a>],
+}
+
+impl CreateArgs<'_> {
+    pub fn body_len(&self) -> usize {
+        self.scheduled
+            .iter()
+            .map(|s| CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
+            .sum()
+    }
+
+    pub fn write_to(&self, data: &mut [u8]) -> usize {
+        let mut off = 0;
+
+        data[off] = ix::CREATE;
+        off += 1;
+
+        data[off..off + 32].copy_from_slice(&self.seed);
+        off += 32;
+
+        data[off..off + 32].copy_from_slice(&self.authority);
+        off += 32;
+
+        data[off..off + 8].copy_from_slice(&self.start_slot.to_le_bytes());
+        off += 8;
+
+        data[off..off + 8].copy_from_slice(&self.interval_slots.to_le_bytes());
+        off += 8;
+
+        data[off..off + 8].copy_from_slice(&self.remaining.to_le_bytes());
+        off += 8;
+
+        data[off..off + 8].copy_from_slice(&self.priority_tip.to_le_bytes());
+        off += 8;
+
+        data[off..off + 4].copy_from_slice(&self.cu_limit.to_le_bytes());
+        off += 4;
+
+        for s in self.scheduled {
+            data[off] = s.metas.len() as u8;
+            off += 1;
+
+            data[off..off + 2].copy_from_slice(&(s.data.len() as u16).to_le_bytes());
+            off += 2;
+
+            data[off..off + 32].copy_from_slice(&s.program_id);
+            off += 32;
+
+            for m in s.metas {
+                let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
+                data[off] = flag;
+                off += 1;
+
+                data[off..off + 32].copy_from_slice(&m.pubkey);
+                off += 32;
+            }
+
+            data[off..off + s.data.len()].copy_from_slice(s.data);
+            off += s.data.len();
+        }
+
+        off
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client builders
 // ---------------------------------------------------------------------------
@@ -52,6 +193,9 @@ mod client {
     use solana_pubkey::{pubkey, Pubkey};
 
     use crate::consts::{ix, META_FLAG_WRITABLE};
+    use crate::instruction::CREATE_FIXED_PREFIX_LEN;
+
+    use super::*;
 
     /// Solana's built-in instructions sysvar pubkey.
     pub const INSTRUCTIONS_SYSVAR_ID: Pubkey =
@@ -60,177 +204,164 @@ mod client {
     /// Solana's system program pubkey.
     pub const SYSTEM_PROGRAM_ID: Pubkey = pubkey!("11111111111111111111111111111111");
 
+    /// The [`base`] / [`ephemeral`] programs.
+    pub const BASE_PROGRAM_ID: Pubkey = pubkey!("Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea");
+    pub const EPHEMERAL_PROGRAM_ID: Pubkey = pubkey!("eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf");
+
     /// Hydra program ID as a `solana_pubkey::Pubkey` (convenience for clients).
-    pub fn program_id() -> Pubkey {
-        Pubkey::new_from_array(crate::ID.to_bytes())
+    pub fn base_program_id() -> Pubkey {
+        Pubkey::new_from_array(crate::base::ID.to_bytes())
     }
 
-    /// Derive `(crank_pda, bump)` using `solana_pubkey::Pubkey`.
-    pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
-        let (addr, bump) = crate::state::find_crank_pda(seed);
-        (Pubkey::new_from_array(addr.to_bytes()), bump)
+    pub fn ephemeral_program_id() -> Pubkey {
+        Pubkey::new_from_array(crate::ephemeral::ID.to_bytes())
     }
 
-    /// A scheduled-ix meta as it will be stored on-chain.
-    ///
-    /// `is_signer` is intentionally absent: scheduled ixs cannot carry
-    /// signer flags (enforced by `Create`), and the on-chain template
-    /// stores only the writable bit anyway.
-    #[derive(Clone, Copy)]
-    pub struct SchedMeta {
-        pub pubkey: Pubkey,
-        pub is_writable: bool,
-    }
+    /// Builders targeting the base-layer Hydra program ([`BASE_PROGRAM_ID`]).
+    pub mod base {
 
-    impl SchedMeta {
-        pub fn readonly(pubkey: Pubkey) -> Self {
-            Self {
-                pubkey,
-                is_writable: false,
+        use super::*;
+
+        /// This module's program ID.
+        pub const PROGRAM_ID: Pubkey = super::BASE_PROGRAM_ID;
+
+        /// Derive `(crank_pda, bump)` under the base program.
+        pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
+            Pubkey::find_program_address(&[crate::consts::CRANK_SEED_PREFIX, seed], &PROGRAM_ID)
+        }
+
+        /// Build a `Create` instruction scheduling a single instruction.
+        pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
+            let mut data = vec![0_u8; 1 + CREATE_FIXED_PREFIX_LEN + args.body_len()];
+            args.write_to(&mut data);
+
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new(payer, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                ],
+                data,
             }
         }
-        pub fn writable(pubkey: Pubkey) -> Self {
-            Self {
-                pubkey,
-                is_writable: true,
+
+        /// Build a `Trigger` instruction. Must be paired in the same tx with the
+        /// scheduled instruction at `current_ix_index + 1`.
+        pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(cranker, true),
+                    AccountMeta::new_readonly(INSTRUCTIONS_SYSVAR_ID, false),
+                ],
+                data: alloc::vec![ix::TRIGGER],
+            }
+        }
+
+        /// Build a `Cancel` instruction.
+        pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new_readonly(authority, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
+                ],
+                data: alloc::vec![ix::CANCEL],
+            }
+        }
+
+        /// Build a `Close` instruction (permissionless cleanup).
+        pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new(reporter, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
+                ],
+                data: alloc::vec![ix::CLOSE],
             }
         }
     }
 
-    /// One scheduled instruction template.
-    pub struct ScheduledIx<'a> {
-        pub program_id: Pubkey,
-        pub metas: &'a [SchedMeta],
-        pub data: &'a [u8],
-    }
+    /// Builders targeting the ephemeral-rollup Hydra program
+    /// ([`EPHEMERAL_PROGRAM_ID`]).
+    pub mod ephemeral {
+        use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
 
-    /// All the scheduling knobs for `Create`.
-    ///
-    /// # Caller responsibilities (the program does NOT check these)
-    ///
-    /// `Create` validates the wire format, the signer-flag ban, and a few
-    /// numeric bounds, but it deliberately does **not** verify that the schedule
-    /// is actually *crankable*. A schedule that violates any rule below is
-    /// accepted and stored, but every `Trigger` will fail — the crank is created
-    /// yet can never fire, stranding its rent. The client is the only party with
-    /// the full account picture, so these are its responsibility:
-    ///
-    /// 1. **Consistent writability per account.** If the same pubkey appears in
-    ///    more than one scheduled ix (or more than once in one ix), it must carry
-    ///    the *same* `is_writable` flag every time. The Solana runtime promotes an
-    ///    account to writable in *every* instruction region of the crank tx if it
-    ///    is writable in any of them; `Trigger` byte-matches the follow-up ix
-    ///    against the stored template, and a promoted `writable` flag can never
-    ///    match a stored `read-only` one.
-    ///
-    /// 2. **The crank PDA is writable.** The crank PDA is writable in
-    ///    `Trigger` itself, so the runtime promotes it to writable everywhere.
-    ///    A scheduled program should authenticate the crank by reading
-    ///    the preceding `Trigger` from the instructions sysvar instead — not by
-    ///    listing the crank PDA as one of its own accounts.
-    ///
-    /// 3. **Be careful referencing the cranker.** The cranker is the tx fee
-    ///    payer (signer + writable) and is unknown at schedule time, so any meta
-    ///    matching it is promoted and breaks the byte-match. Moreover, the cranker
-    ///    may refuse any cranks that includes its own pubkey as an account.
-    pub struct CreateArgs<'a> {
-        pub seed: [u8; 32],
-        /// All-zeros = unkillable (no cancel authority).
-        pub authority: [u8; 32],
-        pub start_slot: u64,
-        pub interval_slots: u64,
-        /// `0` on the wire means "infinite"; Hydra stores `u64::MAX` internally.
-        pub remaining: u64,
-        pub priority_tip: u64,
-        /// Compute-unit limit the cranker emits as `SetComputeUnitLimit`
-        /// right before `Trigger`. `0` = no ix (inherits the 200 k/ix
-        /// default). Capped at `MAX_COMPUTE_UNIT_LIMIT` (1.4 M) at `Create`.
-        pub cu_limit: u32,
-        /// The scheduled instructions, in execution order. Must be non-empty
-        pub scheduled: &'a [ScheduledIx<'a>],
-    }
+        use super::*;
 
-    /// Build a `Create` instruction.
-    ///
-    /// This only serializes the wire format; it does not validate that the
-    /// schedule is crankable. See [`CreateArgs`] for the rules the caller must
-    /// uphold (consistent writability, crank/cranker metas) — a
-    /// schedule that breaks them is accepted on-chain but can never be triggered.
-    pub fn create(payer: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
-        let body_len: usize = args
-            .scheduled
-            .iter()
-            .map(|s| super::CREATE_IX_HEADER_LEN + 33 * s.metas.len() + s.data.len())
-            .sum();
-        let mut data = Vec::with_capacity(1 + super::CREATE_FIXED_PREFIX_LEN + body_len);
-        data.push(ix::CREATE);
-        data.extend_from_slice(&args.seed);
-        data.extend_from_slice(&args.authority);
-        data.extend_from_slice(&args.start_slot.to_le_bytes());
-        data.extend_from_slice(&args.interval_slots.to_le_bytes());
-        data.extend_from_slice(&args.remaining.to_le_bytes());
-        data.extend_from_slice(&args.priority_tip.to_le_bytes());
-        data.extend_from_slice(&args.cu_limit.to_le_bytes());
-        for s in args.scheduled {
-            data.push(s.metas.len() as u8);
-            data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
-            data.extend_from_slice(&s.program_id.to_bytes());
-            for m in s.metas {
-                let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
-                data.push(flag);
-                data.extend_from_slice(&m.pubkey.to_bytes());
+        /// This module's program ID.
+        pub const PROGRAM_ID: Pubkey = super::EPHEMERAL_PROGRAM_ID;
+
+        /// Derive `(crank_pda, bump)` under the ephemeral program.
+        pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
+            Pubkey::find_program_address(&[crate::consts::CRANK_SEED_PREFIX, seed], &PROGRAM_ID)
+        }
+
+        /// Build a `Create` instruction
+        pub fn create(sponsor: Pubkey, crank: Pubkey, args: &CreateArgs<'_>) -> Instruction {
+            let mut data = vec![0_u8; 1 + super::CREATE_FIXED_PREFIX_LEN + args.body_len()];
+            args.write_to(&mut data);
+
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new(sponsor, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(EPHEMERAL_VAULT_ID, false),
+                    AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
+                ],
+                data,
             }
-            data.extend_from_slice(s.data);
         }
 
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new(payer, true),
-                AccountMeta::new(crank, false),
-                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            ],
-            data,
+        /// Build a `Trigger` instruction.
+        pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(cranker, true),
+                    AccountMeta::new_readonly(INSTRUCTIONS_SYSVAR_ID, false),
+                ],
+                data: alloc::vec![ix::TRIGGER],
+            }
         }
-    }
 
-    /// Build a `Trigger` instruction. Must be paired in the same tx with the
-    /// scheduled instruction at `current_ix_index + 1`.
-    pub fn trigger(crank: Pubkey, cranker: Pubkey) -> Instruction {
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new(crank, false),
-                AccountMeta::new(cranker, true),
-                AccountMeta::new_readonly(INSTRUCTIONS_SYSVAR_ID, false),
-            ],
-            data: alloc::vec![ix::TRIGGER],
+        /// Build a `Cancel` instruction. `recipient` receives the crank's drained
+        /// lamport balance; the vault rent refunds to `authority`.
+        pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new(authority, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
+                    AccountMeta::new(EPHEMERAL_VAULT_ID, false),
+                    AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
+                ],
+                data: alloc::vec![ix::CANCEL],
+            }
         }
-    }
 
-    /// Build a `Cancel` instruction.
-    pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new_readonly(authority, true),
-                AccountMeta::new(crank, false),
-                AccountMeta::new(recipient, false),
-            ],
-            data: alloc::vec![ix::CANCEL],
-        }
-    }
-
-    /// Build a `Close` instruction (permissionless cleanup).
-    pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
-        Instruction {
-            program_id: program_id(),
-            accounts: alloc::vec![
-                AccountMeta::new(reporter, true),
-                AccountMeta::new(crank, false),
-                AccountMeta::new(recipient, false),
-            ],
-            data: alloc::vec![ix::CLOSE],
+        /// Build a `Close` instruction. `reporter` keeps the flat bounty (and the
+        /// vault rent refund); `recipient` receives the remaining balance.
+        pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
+            Instruction {
+                program_id: PROGRAM_ID,
+                accounts: alloc::vec![
+                    AccountMeta::new(reporter, true),
+                    AccountMeta::new(crank, false),
+                    AccountMeta::new(recipient, false),
+                    AccountMeta::new(EPHEMERAL_VAULT_ID, false),
+                    AccountMeta::new_readonly(MAGIC_PROGRAM_ID, false),
+                ],
+                data: alloc::vec![ix::CLOSE],
+            }
         }
     }
 
@@ -297,3 +428,5 @@ mod client {
 
 #[cfg(feature = "client")]
 pub use client::*;
+
+use crate::{ix, META_FLAG_WRITABLE};

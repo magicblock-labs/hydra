@@ -22,10 +22,13 @@ use solana_signer::Signer;
 /// Consecutive failures at the same `next_exec_slot` before a crank is parked.
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
-/// Slots to skip a crank after a successful submit. Absorbs the in-flight
-/// window where both our cache and the RPC's preflight bank are stale; without
-/// it, a second fire within the window lands as `NotYetExecutable` (0x1).
-const POST_SUBMIT_COOLDOWN_SLOTS: u64 = 3;
+/// Backstop floor between fires of the same crank, on top of the optimistic
+/// `next_exec_slot` advance done on every successful submit (see
+/// `cache::advance_after_trigger`). That advance is what normally gates re-fire
+/// to the crank's own `interval_slots`; this only matters when it can't move the
+/// schedule — `interval_slots == 0` ("every slot") cranks — where it caps the
+/// blind retry rate at one fire per slot until the `programSubscribe` echo lands.
+const POST_SUBMIT_COOLDOWN_SLOTS: u64 = 1;
 
 /// Slots between Close attempts on the same crank. Close is one-shot: success
 /// purges the crank from the cache, so this map only tracks race losers.
@@ -51,10 +54,10 @@ mod cache;
 mod fire;
 mod grpc;
 mod metrics;
+mod mode;
 mod watch;
 
 use cache::new_cache;
-use hydra_api::instruction as ix;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -109,6 +112,12 @@ struct Cli {
         default_value_t = false
     )]
     trigger_skip_preflight: bool,
+    /// Target Hydra's ephemeral-rollup program instead of the base-layer one.
+    /// Switches the watched program ID, the `Close` account layout, and the
+    /// funding/eligibility model (ephemeral cranks hold zero lamports). Point
+    /// `--rpc-url` at a MagicBlock ephemeral validator.
+    #[arg(long, env = "HYDRA_CRANKER_EPHEMERAL", default_value_t = false)]
+    ephemeral: bool,
     /// Run *every* eligible crank, including ones whose scheduled instructions
     /// reference the cranker's own pubkey. Such cranks can't actually fire — as
     /// the fee payer the cranker is promoted to signer + writable, so the
@@ -155,9 +164,14 @@ fn main() -> Result<()> {
         .init();
 
     let args = Cli::parse();
+    mode::init(args.ephemeral);
     let cranker = load_keypair(&args.keypair)?;
     let cranker_pubkey = cranker.pubkey();
     log::info!("cranker pubkey = {}", cranker_pubkey);
+    log::info!(
+        "mode = {}",
+        if args.ephemeral { "ephemeral" } else { "base" }
+    );
     if args.run_unsafe {
         log::warn!("--unsafe: running cranks that reference the cranker's own pubkey");
     }
@@ -172,7 +186,7 @@ fn main() -> Result<()> {
     log::info!("rpc = {}", args.rpc_url);
     log::info!("ws  = {}", ws_url);
 
-    let program_id = ix::program_id();
+    let program_id = mode::program_id();
     let cache = new_cache();
     let shutdown = Arc::new(AtomicBool::new(false));
     // `at_slot` anchors each counter to an observed `next_exec_slot`: once
@@ -270,9 +284,9 @@ fn main() -> Result<()> {
             let mut elig = Vec::new();
             let mut clos = Vec::new();
             for entry in guard.values() {
-                if entry.is_closable(slot) {
+                if entry.is_closable(slot, args.ephemeral) {
                     clos.push(entry.clone());
-                } else if entry.is_eligible(slot) {
+                } else if entry.is_eligible(slot, args.ephemeral) {
                     // A crank that references the cranker's own pubkey can never
                     // fire (the cranker is promoted to signer + writable as the
                     // fee payer) and is unsafe to run — skip unless `--unsafe`.
@@ -338,6 +352,10 @@ fn main() -> Result<()> {
                         .with_label_values(&["ok"])
                         .inc();
                     last_submit.insert(entry.pubkey, slot);
+                    // Replay `Trigger`'s schedule advance in our cache now, so
+                    // the crank's next fire follows its `interval_slots` instead
+                    // of stalling until the `programSubscribe` echo catches up.
+                    cache::advance_after_trigger(&cache, entry.pubkey, entry.next_exec_slot);
                     // Failure record clears only when the cache observes an
                     // advanced `next_exec_slot`; submit-Ok alone isn't proof
                     // the tx landed.

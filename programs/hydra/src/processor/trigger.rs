@@ -11,11 +11,16 @@ use pinocchio::{
 };
 
 use hydra_api::{
-    consts::{CRANKER_REWARD, CRANK_HEADER_SIZE, REMAINING_INFINITE},
+    consts::{base, CRANK_HEADER_SIZE, REMAINING_INFINITE},
     HydraError,
 };
 
-use crate::helpers::{get_clock_slot, get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT};
+use hydra_api::program::{
+    helpers::{get_clock_slot, get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
+    processor::{read_u16, verify_followup},
+};
+
+use crate::processor::common::{read_u64, write_u64};
 
 // Field offsets inside the 120-byte `Crank` header, kept local to this file
 // so the raw reads below stay easy to verify against the account layout.
@@ -27,7 +32,7 @@ const OFF_EXECUTED: usize = 96;
 const OFF_RENT_MIN: usize = 104;
 const OFF_REGION_LEN: usize = 112;
 
-pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
+pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     cu_mark(); // 0  — before any work
 
     let [crank_ai, cranker_ai, ix_sysvar_ai] = accounts else {
@@ -37,7 +42,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
     if !cranker_ai.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::ID) {
+    if !crank_ai.owned_by(&crate::ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     if ix_sysvar_ai.address() != &INSTRUCTIONS_ID {
@@ -72,7 +77,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
         return Err(HydraError::Exhausted.into());
     }
 
-    let reward = CRANKER_REWARD
+    let reward = base::CRANKER_REWARD
         .checked_add(hdr.priority_tip)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     let new_crank_lamports = crank_ai
@@ -105,7 +110,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
     // SAFETY: `crank_ai` is owned by this program and has at least
     // `CRANK_HEADER_SIZE` bytes (checked above). No other borrow is live.
     unsafe {
-        let p = crank_ai.data_mut_ptr();
+        let p = crank_ai.data_ptr();
         write_u64(p.add(OFF_NEXT_EXEC_SLOT), next_slot);
         write_u64(p.add(OFF_EXECUTED), hdr.executed + 1);
         if hdr.remaining != REMAINING_INFINITE {
@@ -155,74 +160,4 @@ unsafe fn read_header(p: *const u8) -> Snapshot {
         rent_min: read_u64(p.add(OFF_RENT_MIN)),
         region_len: read_u16(p.add(OFF_REGION_LEN)),
     }
-}
-
-/// Parse the instructions sysvar, locate the region for
-/// `current_ix_index + 1`, and byte-compare it against the crank's stored tail.
-#[inline(always)]
-fn verify_followup(sysvar: &AccountView, crank: &AccountView, region_len: usize) -> ProgramResult {
-    // SAFETY: we're in a linear entrypoint flow with no outstanding borrows
-    // on either account. pinocchio's `borrow_unchecked` skips the refcell
-    // bookkeeping, which saves a handful of CUs per call.
-    let sv: &[u8] = unsafe { sysvar.borrow_unchecked() };
-    let cr: &[u8] = unsafe { crank.borrow_unchecked() };
-
-    let sv_len = sv.len();
-    if sv_len < 4 {
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    // [len-2..len] = current_ix_index (u16 LE)
-    let current = unsafe { read_u16(sv.as_ptr().add(sv_len - 2)) } as usize;
-    let target = current
-        .checked_add(1)
-        .ok_or(HydraError::MissingFollowupInstruction)?;
-
-    // [0..2] = num_instructions (u16 LE)
-    let num_ix = unsafe { read_u16(sv.as_ptr()) } as usize;
-    if target >= num_ix {
-        return Err(HydraError::MissingFollowupInstruction.into());
-    }
-
-    // [2 + 2*target..+2] = offset of instruction `target`'s region.
-    let off_pos = 2 + 2 * target;
-    if off_pos + 2 > sv_len {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    let region_start = unsafe { read_u16(sv.as_ptr().add(off_pos)) } as usize;
-    let region_end = region_start
-        .checked_add(region_len)
-        .ok_or(HydraError::MismatchedFollowupIx)?;
-    if region_end > sv_len.saturating_sub(2) {
-        return Err(HydraError::MismatchedFollowupIx.into());
-    }
-
-    let tail_end = CRANK_HEADER_SIZE
-        .checked_add(region_len)
-        .ok_or(ProgramError::InvalidAccountData)?;
-    if tail_end > cr.len() {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    let tail = &cr[CRANK_HEADER_SIZE..tail_end];
-    let sv_region = &sv[region_start..region_end];
-
-    if sv_region != tail {
-        return Err(HydraError::MismatchedFollowupIx.into());
-    }
-    Ok(())
-}
-
-#[inline(always)]
-unsafe fn read_u64(p: *const u8) -> u64 {
-    core::ptr::read_unaligned(p as *const u64)
-}
-
-#[inline(always)]
-unsafe fn read_u16(p: *const u8) -> u16 {
-    core::ptr::read_unaligned(p as *const u16)
-}
-
-#[inline(always)]
-unsafe fn write_u64(p: *mut u8, v: u64) {
-    core::ptr::write_unaligned(p as *mut u64, v);
 }

@@ -62,7 +62,12 @@ pub fn fire_trigger(
 ) -> Result<()> {
     let scheduled = ix::scheduled_ixs_from_crank(&entry.data)
         .ok_or_else(|| anyhow!("malformed crank tail for {}", entry.pubkey))?;
-    let trigger = ix::trigger(entry.pubkey, cranker.pubkey());
+    // Same accounts in both programs; only the program ID differs.
+    let trigger = if crate::mode::is_ephemeral() {
+        ix::ephemeral::trigger(entry.pubkey, cranker.pubkey())
+    } else {
+        ix::base::trigger(entry.pubkey, cranker.pubkey())
+    };
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {
         metrics::metrics()
             .rpc_errors_total
@@ -163,12 +168,18 @@ pub fn fire_close(
     entry: &CrankEntry,
     priority_fee_micro_lamports: u64,
 ) -> Result<()> {
+    // Refund recipient: the authority if set (anti-grief binds it on-chain),
+    // otherwise the cranker itself.
     let recipient = if entry.authority == [0u8; 32] {
         cranker.pubkey()
     } else {
         Pubkey::new_from_array(entry.authority)
     };
-    let close = ix::close(cranker.pubkey(), entry.pubkey, recipient);
+    let close = if crate::mode::is_ephemeral() {
+        ix::ephemeral::close(cranker.pubkey(), entry.pubkey, recipient)
+    } else {
+        ix::base::close(cranker.pubkey(), entry.pubkey, recipient)
+    };
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {
         metrics::metrics()
             .rpc_errors_total
