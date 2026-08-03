@@ -11,7 +11,7 @@ use std::{
 use solana_pubkey::Pubkey;
 
 use hydra_api::{
-    consts::{self, CRANK_HEADER_SIZE, REMAINING_INFINITE},
+    consts::{self, CRANK_HEADER_SIZE},
     SERIALIZED_META_SIZE,
 };
 
@@ -173,8 +173,7 @@ pub enum CacheOutcome {
 /// so re-fire timing follows the crank's own `interval_slots` instead of waiting
 /// for the `programSubscribe` echo (which lags by an unbounded number of slots).
 ///
-/// Mirrors `processor/*/trigger.rs`: `next_exec_slot += interval_slots` and
-/// `remaining -= 1` (the `u64::MAX` "infinite" sentinel never decrements). Guarded
+/// Mirrors `processor/*/trigger.rs`'s `next_exec_slot += interval_slots`. Guarded
 /// by an equality check on `next_exec_slot`: if a notification already advanced the
 /// entry past the snapshot we fired on, that authoritative update wins and we don't
 /// double-advance. A late, *pre*-trigger notification can still overwrite this with
@@ -188,9 +187,6 @@ pub fn advance_after_trigger(cache: &Cache, pubkey: Pubkey, fired_at_next_exec: 
             return;
         }
         e.next_exec_slot = e.next_exec_slot.saturating_add(e.interval_slots);
-        if e.remaining != REMAINING_INFINITE && e.remaining != 0 {
-            e.remaining -= 1;
-        }
     }
 }
 
@@ -229,7 +225,7 @@ pub fn apply_update(cache: &Cache, pubkey: Pubkey, lamports: u64, data: &[u8]) -
 
 #[cfg(test)]
 mod tests {
-    use hydra_api::META_FLAG_WRITABLE;
+    use hydra_api::{consts::REMAINING_INFINITE, META_FLAG_WRITABLE};
 
     use super::*;
 
@@ -276,14 +272,29 @@ mod tests {
     }
 
     #[test]
-    fn advance_replays_trigger_effect() {
+    fn advance_replays_the_schedule_but_not_the_countdown() {
         let cache = new_cache();
         let pk = seed(&cache, entry(100, 5, 3));
         advance_after_trigger(&cache, pk, 100);
         assert_eq!(
             snapshot(&cache, &pk),
-            (105, 2),
-            "next_exec += interval, remaining -= 1"
+            (105, 3),
+            "next_exec += interval; remaining is left to the authoritative update"
+        );
+    }
+
+    #[test]
+    fn advance_never_exhausts_the_last_execution_locally() {
+        let cache = new_cache();
+        let pk = seed(&cache, entry(100, 5, 1));
+        advance_after_trigger(&cache, pk, 100);
+        assert_eq!(snapshot(&cache, &pk), (105, 1), "remaining stays 1");
+        let g = cache.lock().unwrap();
+        let e = g.get(&pk).unwrap();
+        assert!(e.is_eligible(105, false), "still triggerable at 105");
+        assert!(
+            !e.is_closable(105, false),
+            "must not be treated as exhausted"
         );
     }
 
@@ -311,14 +322,6 @@ mod tests {
             (101, REMAINING_INFINITE),
             "infinite cranks advance the schedule but never decrement remaining"
         );
-    }
-
-    #[test]
-    fn advance_does_not_underflow_an_exhausted_crank() {
-        let cache = new_cache();
-        let pk = seed(&cache, entry(100, 1, 0));
-        advance_after_trigger(&cache, pk, 100);
-        assert_eq!(snapshot(&cache, &pk).1, 0, "remaining == 0 stays 0");
     }
 
     #[test]
