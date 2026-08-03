@@ -411,6 +411,7 @@ fn main() -> Result<()> {
                         .closes_submitted_total
                         .with_label_values(&["ok"])
                         .inc();
+                    last_close_attempt.insert(entry.pubkey, slot);
                 }
                 Err(e) => {
                     log::debug!("slot {}: close {} dropped: {:#}", slot, entry.pubkey, e);

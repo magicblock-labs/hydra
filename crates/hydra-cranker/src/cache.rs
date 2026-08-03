@@ -202,7 +202,7 @@ pub fn advance_after_trigger(cache: &Cache, pubkey: Pubkey, fired_at_next_exec: 
 /// the two stay byte-for-byte consistent.
 pub fn apply_update(cache: &Cache, pubkey: Pubkey, lamports: u64, data: &[u8]) -> CacheOutcome {
     let mut guard = cache.lock().expect("cache poisoned");
-    if lamports == 0 || data.is_empty() {
+    if data.is_empty() || (!crate::mode::is_ephemeral() && lamports == 0) {
         return if guard.remove(&pubkey).is_some() {
             CacheOutcome::Removed
         } else {
