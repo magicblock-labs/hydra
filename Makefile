@@ -35,18 +35,12 @@ help: ## Show this help
 # ---------------------------------------------------------------------------
 # Build — on-chain SBF programs (artifacts land in target/deploy/*.so).
 # ---------------------------------------------------------------------------
-.PHONY: build build-base build-ephemeral build-noop build-examples
+.PHONY: build build-examples
 
-build: build-base build-ephemeral ## build-sbf the base + ephemeral hydra programs
-
-build-base: build-noop ## build-sbf the base hydra program
-	cargo build-sbf --manifest-path $(BASE_MANIFEST)
-
-build-ephemeral: build-noop ## build-sbf the ephemeral-rollup hydra program
-	cargo build-sbf --manifest-path $(EPHEMERAL_MANIFEST)
-
-build-noop: ## build-sbf the noop test program (target of scheduled ixs)
+build: ## build-sbf the noop + base + ephemeral hydra programs
 	cargo build-sbf --manifest-path $(NOOP_MANIFEST)
+	cargo build-sbf --manifest-path $(BASE_MANIFEST)
+	cargo build-sbf --manifest-path $(EPHEMERAL_MANIFEST)
 
 build-examples: ## build-sbf the native + pinocchio example programs
 	cargo build-sbf --manifest-path $(NATIVE_MANIFEST)
@@ -77,21 +71,21 @@ lint-e2e: ## Clippy only the e2e crate
 # ---------------------------------------------------------------------------
 .PHONY: test test-examples test-e2e test-all bench cu-table
 
-test: build-base ## Run the hydra-tests suite (unit + integration, via nextest)
+test: build ## Run the hydra-tests suite (unit + integration, via nextest)
 	cargo nextest run -p hydra-tests
 
-test-examples: build-base build-examples ## Run the native + pinocchio example mollusk tests
+test-examples: build build-examples ## Run the native + pinocchio example mollusk tests
 	cargo nextest run -p hydra-example-native -p hydra-example-pinocchio
 
-test-e2e: build-ephemeral build-noop ## Live e2e: spawns validators + cranker (needs the ephemeral-validator npm pkg)
+test-e2e: build ## Live e2e: spawns validators + cranker (needs the ephemeral-validator npm pkg)
 	cargo test --manifest-path $(E2E_MANIFEST) -- --ignored --nocapture --test-threads=1
 
 test-all: test test-examples test-e2e ## Run hydra-tests, examples, and live e2e
 
-bench: build-base ## Run the compute-unit benchmarks
+bench: build ## Run the compute-unit benchmarks
 	cargo bench -p hydra-tests
 
-cu-table: build-base ## Print the per-instruction CU table (the ignored cu_table test)
+cu-table: build ## Print the per-instruction CU table (the ignored cu_table test)
 	cargo test -p hydra-tests cu_table -- --ignored --nocapture
 
 # ---------------------------------------------------------------------------

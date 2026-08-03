@@ -49,6 +49,7 @@
 
 use std::fs;
 use std::io::ErrorKind;
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
@@ -297,6 +298,9 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
     let cranks = match order {
         CreateOrder::BeforeCranker => {
             let cranks = create_cranks(&sponsor, &fee_payer, noop_id)?;
+            for crank in &cranks {
+                assert_crank_exists(&er_rpc, crank)?;
+            }
             spawn_cranker(stack, &cranker_bin, &cranker_kp_path, &tmp)?;
             cranks
         }
@@ -389,8 +393,10 @@ fn signal_stack_processes(signal: &str) {
         .status();
 }
 
-/// Create `NUM_CRANKS` cranks on the rollup in parallel, asserting each materialized.
-/// Returns their PDAs in index order.
+/// Create `NUM_CRANKS` cranks on the rollup in parallel.
+/// Returns their PDAs in index order. Callers that start the cranker first must
+/// not assert account existence here: finite cranks can execute and close before
+/// the confirmed create transaction returns.
 fn create_cranks(sponsor: &Keypair, fee_payer: &Keypair, noop_id: Pubkey) -> Result<Vec<Pubkey>> {
     let rpc_url = format!("http://127.0.0.1:{ER_RPC_PORT}");
     let commitment = CommitmentConfig::confirmed();
@@ -405,9 +411,6 @@ fn create_cranks(sponsor: &Keypair, fee_payer: &Keypair, noop_id: Pubkey) -> Res
             handles.push(scope.spawn(move || {
                 let rpc = RpcClient::new_with_commitment(rpc_url, commitment);
                 let crank = create_crank(&rpc, sponsor, fee_payer, crank_seed(i), noop_id, i)?;
-                assert_crank_exists(&rpc, &crank).with_context(|| {
-                    format!("crank {i} ({crank}) was not created on the rollup")
-                })?;
                 Ok((i, crank))
             }));
         }
@@ -629,7 +632,10 @@ struct LogFireWatcher {
     started: Instant,
     state: Arc<Mutex<FireWatch>>,
     shutdown: Arc<AtomicBool>,
-    _sub: solana_pubsub_client::pubsub_client::PubsubLogsClientSubscription,
+    // The synchronous client's Drop can block forever waiting for its reader
+    // thread to release the websocket lock. Validators own this test process's
+    // connection lifetime, so deliberately skip that unbounded destructor.
+    _sub: ManuallyDrop<solana_pubsub_client::pubsub_client::PubsubLogsClientSubscription>,
     thread: JoinHandle<()>,
 }
 
@@ -692,7 +698,7 @@ impl LogFireWatcher {
             started,
             state,
             shutdown,
-            _sub: sub,
+            _sub: ManuallyDrop::new(sub),
             thread,
         })
     }
@@ -711,8 +717,6 @@ impl LogFireWatcher {
         self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.thread.join();
         let watch = self.state.lock().expect("fire watch poisoned").clone();
-        // PubsubClient::drop can block sending an unsubscribe over a closing socket.
-        std::mem::forget(self._sub);
         Ok(watch)
     }
 }
