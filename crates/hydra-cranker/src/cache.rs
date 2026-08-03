@@ -15,6 +15,8 @@ use hydra_api::{
     SERIALIZED_META_SIZE,
 };
 
+use crate::mode;
+
 /// Minimal decoded projection of a Crank account — just the fields we need
 /// for eligibility checks. The full raw bytes live in `data` so the trigger
 /// loop can rebuild the scheduled instruction.
@@ -38,16 +40,16 @@ pub struct CrankEntry {
     pub data: Vec<u8>,
 }
 
-fn cranker_reward(is_ephemeral: bool) -> u64 {
-    if is_ephemeral {
+fn cranker_reward() -> u64 {
+    if mode::is_ephemeral() {
         consts::ephemeral::CRANKER_REWARD
     } else {
         consts::base::CRANKER_REWARD
     }
 }
 
-fn staleness_threshold_slots(is_ephemeral: bool) -> u64 {
-    if is_ephemeral {
+fn staleness_threshold_slots() -> u64 {
+    if mode::is_ephemeral() {
         consts::ephemeral::STALENESS_THRESHOLD_SLOTS
     } else {
         consts::base::STALENESS_THRESHOLD_SLOTS
@@ -84,14 +86,14 @@ impl CrankEntry {
 
     /// Mirrors Hydra's on-chain Trigger pre-flight: slot reached, not
     /// exhausted, enough lamports to cover reward + tip above the rent floor.
-    pub fn is_eligible(&self, current_slot: u64, is_ephemeral: bool) -> bool {
+    pub fn is_eligible(&self, current_slot: u64) -> bool {
         if current_slot < self.next_exec_slot {
             return false;
         }
         if self.remaining == 0 {
             return false;
         }
-        let reward = cranker_reward(is_ephemeral).saturating_add(self.priority_tip);
+        let reward = cranker_reward().saturating_add(self.priority_tip);
         self.lamports >= self.rent_min.saturating_add(reward)
     }
 
@@ -141,16 +143,16 @@ impl CrankEntry {
 
     /// Mirrors on-chain `Close` pre-condition: exhausted OR underfunded OR
     /// stuck (`current_slot - next_exec_slot > STALENESS_THRESHOLD_SLOTS`).
-    pub fn is_closable(&self, current_slot: u64, is_ephemeral: bool) -> bool {
+    pub fn is_closable(&self, current_slot: u64) -> bool {
         if self.remaining == 0 {
             return true;
         }
-        let next_reward = cranker_reward(is_ephemeral).saturating_add(self.priority_tip);
+        let next_reward = cranker_reward().saturating_add(self.priority_tip);
         if self.lamports < self.rent_min.saturating_add(next_reward) {
             return true;
         }
         // `saturating_sub` keeps future-scheduled cranks trivially not stale.
-        current_slot.saturating_sub(self.next_exec_slot) > staleness_threshold_slots(is_ephemeral)
+        current_slot.saturating_sub(self.next_exec_slot) > staleness_threshold_slots()
     }
 }
 
@@ -285,17 +287,15 @@ mod tests {
 
     #[test]
     fn advance_never_exhausts_the_last_execution_locally() {
+        mode::init(false);
         let cache = new_cache();
         let pk = seed(&cache, entry(100, 5, 1));
         advance_after_trigger(&cache, pk, 100);
         assert_eq!(snapshot(&cache, &pk), (105, 1), "remaining stays 1");
         let g = cache.lock().unwrap();
         let e = g.get(&pk).unwrap();
-        assert!(e.is_eligible(105, false), "still triggerable at 105");
-        assert!(
-            !e.is_closable(105, false),
-            "must not be treated as exhausted"
-        );
+        assert!(e.is_eligible(105), "still triggerable at 105");
+        assert!(!e.is_closable(105), "must not be treated as exhausted");
     }
 
     #[test]
