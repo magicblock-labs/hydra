@@ -4,8 +4,6 @@
 /// Seed prefix for the Crank PDA: `[b"crank", seed_bytes]`.
 pub const CRANK_SEED_PREFIX: &[u8] = b"crank";
 
-pub const BASE_FEE_LAMPORTS: u64 = 50;
-
 /// Max metas a single scheduled ix may declare.
 pub const MAX_ACCOUNTS: usize = 32;
 
