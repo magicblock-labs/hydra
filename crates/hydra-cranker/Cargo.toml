@@ -11,7 +11,7 @@ name = "hydra-cranker"
 path = "src/main.rs"
 
 [dependencies]
-hydra-api = { workspace = true, features = ["client"] }
+hydra-api = { workspace = true, features = ["client", "ephemeral"] }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }

@@ -289,6 +289,7 @@ mod client {
 
     /// Builders targeting the ephemeral-rollup Hydra program
     /// ([`EPHEMERAL_PROGRAM_ID`]).
+    #[cfg(feature = "ephemeral")]
     pub mod ephemeral {
         use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
 

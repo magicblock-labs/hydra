@@ -170,6 +170,7 @@ pub mod base {
     }
 }
 
+#[cfg(feature = "ephemeral")]
 pub mod ephemeral {
     #[cfg(feature = "cpi-native")]
     pub mod native {

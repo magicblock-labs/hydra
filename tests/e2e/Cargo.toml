@@ -9,7 +9,10 @@ publish = false
 # `Create`/`Trigger` account layouts that match the deployed program.
 # `client` only — the ephemeral builders are reached at runtime via
 # `instruction::ephemeral::*`, matching how the cranker selects its program.
-hydra-api = { path = "../../crates/hydra-api", features = ["client"] }
+hydra-api = { path = "../../crates/hydra-api", features = [
+    "client",
+    "ephemeral",
+] }
 
 anyhow = "1"
 crossbeam-channel = "0.5"
