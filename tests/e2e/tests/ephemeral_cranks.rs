@@ -66,6 +66,7 @@ use hydra_api::instruction::{
     ephemeral::{self as eph},
     CreateArgs,
 };
+use solana_client::pubsub_client::PubsubLogsClientSubscription;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::{AccountMeta, Instruction};
@@ -632,10 +633,9 @@ struct LogFireWatcher {
     started: Instant,
     state: Arc<Mutex<FireWatch>>,
     shutdown: Arc<AtomicBool>,
-    // The synchronous client's Drop can block forever waiting for its reader
-    // thread to release the websocket lock. Validators own this test process's
-    // connection lifetime, so deliberately skip that unbounded destructor.
-    _sub: ManuallyDrop<solana_pubsub_client::pubsub_client::PubsubLogsClientSubscription>,
+    // The synchronous client's Drop is documented as unbounded, so it is never
+    // run inline — [`close_subscription`] releases it off-thread instead.
+    sub: ManuallyDrop<solana_pubsub_client::pubsub_client::PubsubLogsClientSubscription>,
     thread: JoinHandle<()>,
 }
 
@@ -698,7 +698,7 @@ impl LogFireWatcher {
             started,
             state,
             shutdown,
-            _sub: ManuallyDrop::new(sub),
+            sub: ManuallyDrop::new(sub),
             thread,
         })
     }
@@ -717,7 +717,20 @@ impl LogFireWatcher {
         self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.thread.join();
         let watch = self.state.lock().expect("fire watch poisoned").clone();
+        close_subscription(self.sub);
         Ok(watch)
+    }
+}
+
+fn close_subscription(sub: ManuallyDrop<PubsubLogsClientSubscription>) {
+    let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+    thread::spawn(move || {
+        drop(ManuallyDrop::into_inner(sub));
+        let _ = done_tx.send(());
+    });
+    match done_rx.recv_timeout(Duration::from_millis(500)) {
+        Ok(()) => eprintln!("[watch] logsSubscribe closed"),
+        Err(_) => eprintln!("[watch] logsSubscribe close still pending; finishing at teardown"),
     }
 }
 
