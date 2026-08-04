@@ -279,7 +279,9 @@ fn main() -> Result<()> {
             let mut elig = Vec::new();
             let mut clos = Vec::new();
             for entry in guard.values() {
-                if entry.is_closable(slot) {
+                let closable_by_us =
+                    !mode::is_ephemeral() || entry.close_reporter_allowed(&cranker_pubkey);
+                if entry.is_closable(slot) && closable_by_us {
                     clos.push(entry.clone());
                 } else if entry.is_eligible(slot) {
                     // A crank that references the cranker's own pubkey can never

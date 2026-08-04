@@ -141,6 +141,12 @@ impl CrankEntry {
         false
     }
 
+    /// Whether `cranker` is an acceptable `reporter` for the *ephemeral*
+    /// `Close`, which is permissionless only for unowned cranks.
+    pub fn close_reporter_allowed(&self, cranker: &Pubkey) -> bool {
+        self.authority == [0u8; 32] || self.authority == cranker.to_bytes()
+    }
+
     /// Mirrors on-chain `Close` pre-condition: exhausted OR underfunded OR
     /// stuck (`current_slot - next_exec_slot > STALENESS_THRESHOLD_SLOTS`).
     pub fn is_closable(&self, current_slot: u64) -> bool {
@@ -296,6 +302,28 @@ mod tests {
         let e = g.get(&pk).unwrap();
         assert!(e.is_eligible(105), "still triggerable at 105");
         assert!(!e.is_closable(105), "must not be treated as exhausted");
+    }
+
+    #[test]
+    fn only_the_authority_may_report_a_close_of_an_owned_crank() {
+        let cranker = Pubkey::new_unique();
+        let mut e = entry(100, 5, 0);
+        assert!(
+            e.close_reporter_allowed(&cranker),
+            "unowned crank stays permissionlessly closable"
+        );
+
+        e.authority = Pubkey::new_unique().to_bytes();
+        assert!(
+            !e.close_reporter_allowed(&cranker),
+            "someone else's crank is not ours to close"
+        );
+
+        e.authority = cranker.to_bytes();
+        assert!(
+            e.close_reporter_allowed(&cranker),
+            "we are the authority, so the gate accepts us"
+        );
     }
 
     #[test]

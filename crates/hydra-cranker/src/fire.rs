@@ -159,9 +159,14 @@ fn confirm_or_fail(rpc: &RpcClient, signature: &Signature) -> Result<()> {
     }
 }
 
-/// Submit a permissionless `Close`. The cranker keeps the `CRANKER_REWARD`
-/// bounty; the remaining rent goes to `entry.authority` if set, otherwise to
-/// the cranker (on-chain anti-grief check in close.rs).
+/// Submit a `Close`. The cranker keeps the `CRANKER_REWARD` bounty; the
+/// remaining rent goes to `entry.authority` if set, otherwise to the cranker
+/// (on-chain anti-grief check in close.rs).
+///
+/// Permissionless on the base program. The ephemeral one additionally gates an
+/// owned crank's `Close` to its authority, so in that mode callers must have
+/// checked [`CrankEntry::close_reporter_allowed`] first — the cranker signs as
+/// `reporter`, and a Close it isn't authorized for reverts every time.
 pub fn fire_close(
     rpc: &RpcClient,
     cranker: &Keypair,
