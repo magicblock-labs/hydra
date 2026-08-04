@@ -21,6 +21,7 @@ pub mod base {
         //! hydra_cpi::create(
         //!     payer_ai, crank_ai, system_program_ai,
         //!     &CreateArgs { seed, authority: [0u8; 32], /* ... */ },
+        //!     &signer_seeds,
         //! )?;
         //! ```
 
