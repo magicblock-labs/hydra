@@ -84,6 +84,15 @@ use solana_transaction::Transaction;
 /// Base L1 JSON-RPC port. solana-test-validator serves PubSub on `PORT + 1`.
 const BASE_RPC_PORT: u16 = 7101;
 const BASE_WS_PORT: u16 = BASE_RPC_PORT + 1;
+/// Faucet port, and the range the validator draws gossip/TPU/etc. from. Pinned
+/// for the same reason as the RPC ports: the defaults (9900 faucet, 8000
+/// gossip) collide with any other `mb-test-validator`/`solana-test-validator` a
+/// developer happens to be running, and the collision surfaces only as an
+/// opaque "base did not become healthy" — the real cause is buried in the
+/// ledger's own `validator.log`.
+const BASE_FAUCET_PORT: u16 = BASE_RPC_PORT + 2;
+const BASE_GOSSIP_PORT: u16 = BASE_RPC_PORT + 3;
+const BASE_DYNAMIC_PORT_RANGE: &str = "7110-7140";
 /// Ephemeral rollup RPC port. Aperture serves RPC + WS on the same address,
 /// which is exactly what the cranker's `http→ws` URL derivation assumes.
 const ER_RPC_PORT: u16 = 7799;
@@ -135,6 +144,9 @@ enum CreateOrder {
     /// Cranks are created after the cranker is already running with an empty
     /// cache — picked up via live `programSubscribe` notifications.
     AfterCranker,
+    /// No cranks at all: the cranker keypair is left unfunded, so it cannot pay
+    /// for its own delegation, and is expected to refuse to start.
+    CrankerCannotDelegate,
 }
 
 // Both tests bind the same fixed local ports and spawn validators, so they must
@@ -155,6 +167,15 @@ fn ephemeral_cranks_fire_on_schedule() {
 #[ignore = "spawns live validators + cranker; run with --ignored"]
 fn cranker_catches_cranks_created_after_start() {
     run_scenario(CreateOrder::AfterCranker);
+}
+
+/// A cranker that cannot get itself delegated exits at startup instead of
+/// running. Without the guard it would look healthy while every trigger
+/// reverted `InvalidAccountForFee`.
+#[test]
+#[ignore = "spawns live validators + cranker; run with --ignored"]
+fn cranker_refuses_to_start_when_not_delegated() {
+    run_scenario(CreateOrder::CrankerCannotDelegate);
 }
 
 fn run_scenario(order: CreateOrder) {
@@ -216,6 +237,12 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
             tmp.join("base-ledger").to_str().unwrap(),
             "--rpc-port",
             &BASE_RPC_PORT.to_string(),
+            "--faucet-port",
+            &BASE_FAUCET_PORT.to_string(),
+            "--gossip-port",
+            &BASE_GOSSIP_PORT.to_string(),
+            "--dynamic-port-range",
+            BASE_DYNAMIC_PORT_RANGE,
             "--bind-address",
             "127.0.0.1",
             "--bpf-program",
@@ -243,12 +270,17 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
     //    for a delegated account). The fee_payer stays a plain system wallet.
     airdrop(&base_rpc, &sponsor.pubkey(), 100 * LAMPORTS_PER_SOL)?;
     airdrop(&base_rpc, &fee_payer.pubkey(), 10 * LAMPORTS_PER_SOL)?;
-    airdrop(&base_rpc, &cranker.pubkey(), 10 * LAMPORTS_PER_SOL)?;
+    // The `CrankerCannotDelegate` scenario leaves the cranker broke: it cannot
+    // fund the delegation PDAs, which is the condition under test.
+    if order != CreateOrder::CrankerCannotDelegate {
+        airdrop(&base_rpc, &cranker.pubkey(), 10 * LAMPORTS_PER_SOL)?;
+    }
     delegate(&base_rpc, &sponsor, &fee_payer)?;
-    delegate(&base_rpc, &cranker, &fee_payer)?;
-
+    // The cranker is deliberately left undelegated: it delegates itself at
+    // startup, paying for it out of its own balance, and these tests are what
+    // prove that path works.
     eprintln!(
-        "[stack] funded + delegated sponsor {} and cranker {} (fee_payer {})",
+        "[stack] funded sponsor {} (delegated) and cranker {} (self-delegates) (fee_payer {})",
         sponsor.pubkey(),
         cranker.pubkey(),
         fee_payer.pubkey()
@@ -288,6 +320,12 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
     // before we make it clone accounts from the base.
     std::thread::sleep(Duration::from_secs(3));
 
+    // The undelegated-cranker scenario needs no cranks and no log watcher: the
+    // cranker must refuse to start at all.
+    if order == CreateOrder::CrankerCannotDelegate {
+        return assert_cranker_exits_undelegated(&cranker_bin, &cranker_kp_path, &tmp);
+    }
+
     // Subscribe to noop execution logs before any crank can fire so we never
     // miss an early trigger while the cranker is still bootstrapping.
     let log_watcher = LogFireWatcher::spawn(noop_id)?;
@@ -314,6 +352,8 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
             eprintln!("[stack] cranker is up with an empty cache; creating cranks now");
             create_cranks(&sponsor, &fee_payer, noop_id)?
         }
+        // Returned above, before the log watcher was even created.
+        CreateOrder::CrankerCannotDelegate => unreachable!(),
     };
 
     // 6. Wait until every crank has fired enough times. Each scheduled noop
@@ -342,7 +382,35 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
     }
 
     eprintln!("[stack] all {NUM_CRANKS} cranks fired ≥{TARGET_EXECUTIONS}× on schedule");
+
+    // 8. Shut the cranker down on its own, with both validators still up, and
+    //    confirm it released the delegation it took at startup. The rollup only
+    //    *schedules* the commit+undelegate, so the base layer takes a few slots
+    //    to show the account back under its original owner.
+    stack.stop("hydra-cranker");
+    wait_until_undelegated(&base_rpc, &cranker.pubkey(), Duration::from_secs(30))?;
+    eprintln!("[stack] cranker undelegated itself on shutdown");
+
     Ok(())
+}
+
+/// Block until `account` is no longer delegated on the base layer.
+fn wait_until_undelegated(base: &RpcClient, account: &Pubkey, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let delegated = match base.get_account(account) {
+            Ok(a) => a.owner == delegation_program_id(),
+            // A vanished account is certainly not delegated.
+            Err(_) => false,
+        };
+        if !delegated {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("cranker {account} was still delegated {timeout:?} after shutdown");
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 
 // --- Scenario helpers -------------------------------------------------------
@@ -352,6 +420,7 @@ fn assert_ports_free() -> Result<()> {
     use std::net::TcpListener;
     for (port, label) in [
         (BASE_RPC_PORT, "mb-test-validator"),
+        (BASE_FAUCET_PORT, "mb-test-validator faucet"),
         (ER_RPC_PORT, "ephemeral-validator"),
     ] {
         if TcpListener::bind(("127.0.0.1", port)).is_err() {
@@ -443,29 +512,91 @@ fn spawn_cranker(
     cranker_kp_path: &Path,
     tmp: &Path,
 ) -> Result<()> {
+    let cranker = spawn_cranker_process(cranker_bin, cranker_kp_path, tmp, &[])?;
+    stack.push("hydra-cranker", cranker);
+    Ok(())
+}
+
+/// Start the cranker process against the rollup, with `extra_args` appended.
+/// Returns the child so a caller can wait on it instead of tearing it down.
+fn spawn_cranker_process(
+    cranker_bin: &Path,
+    cranker_kp_path: &Path,
+    tmp: &Path,
+    extra_args: &[&str],
+) -> Result<Child> {
     eprintln!("[stack] starting hydra-cranker → rollup");
-    let cranker = spawn(
+    let rpc_url = format!("http://127.0.0.1:{ER_RPC_PORT}");
+    // The rollup serves RPC and WebSocket on separate ports (RPC+1), unlike the
+    // cranker's default same-port `http→ws` derivation.
+    let ws_url = format!("ws://127.0.0.1:{}", ER_RPC_PORT + 1);
+    let base_rpc_url = format!("http://127.0.0.1:{BASE_RPC_PORT}");
+    let mut args: Vec<&str> = vec![
+        "--rpc-url",
+        &rpc_url,
+        "--ws-url",
+        &ws_url,
+        "--keypair",
+        cranker_kp_path.to_str().unwrap(),
+        // The cranker delegates itself at startup and undelegates on shutdown,
+        // both of which need the base layer.
+        "--base-rpc-url",
+        &base_rpc_url,
+        // Target the ephemeral-rollup program (runtime selection, not a build
+        // feature).
+        "--ephemeral",
+        // Triggers must skip preflight: the rollup only clones referenced
+        // accounts on the real send path, not during preflight simulation.
+        "--trigger-skip-preflight",
+    ];
+    args.extend_from_slice(extra_args);
+    spawn(
         cranker_bin.to_str().unwrap(),
-        &[
-            "--rpc-url",
-            &format!("http://127.0.0.1:{ER_RPC_PORT}"),
-            // The rollup serves RPC and WebSocket on separate ports (RPC+1),
-            // unlike the cranker's default same-port `http→ws` derivation.
-            "--ws-url",
-            &format!("ws://127.0.0.1:{}", ER_RPC_PORT + 1),
-            "--keypair",
-            cranker_kp_path.to_str().unwrap(),
-            // Target the ephemeral-rollup program (runtime selection, not a
-            // build feature).
-            "--ephemeral",
-            // Triggers must skip preflight: the rollup only clones referenced
-            // accounts on the real send path, not during preflight simulation.
-            "--trigger-skip-preflight",
-        ],
+        &args,
         fs::File::create(tmp.join("cranker.log"))?,
         &[("RUST_LOG", "info")],
+    )
+}
+
+/// Start the cranker with a keypair it cannot get delegated and assert it exits
+/// non-zero rather than running. A short `--delegation-timeout-secs` keeps the
+/// test quick while still exercising the retry loop.
+fn assert_cranker_exits_undelegated(
+    cranker_bin: &Path,
+    cranker_kp_path: &Path,
+    tmp: &Path,
+) -> Result<()> {
+    let mut child = spawn_cranker_process(
+        cranker_bin,
+        cranker_kp_path,
+        tmp,
+        &["--delegation-timeout-secs", "5"],
     )?;
-    stack.push("hydra-cranker", cranker);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(200)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("cranker kept running with an undelegated keypair; it must refuse to start");
+            }
+        }
+    };
+
+    if status.success() {
+        bail!("cranker exited 0 with an undelegated keypair; it must fail");
+    }
+
+    // The message is the whole point — an operator has to be able to tell this
+    // apart from an ordinary RPC problem.
+    let log = fs::read_to_string(tmp.join("cranker.log")).unwrap_or_default();
+    if !log.contains("delegat") {
+        bail!("cranker exited {status:?} but never mentioned delegation:\n{log}");
+    }
+    eprintln!("[stack] cranker refused to start while undelegated ({status})");
     Ok(())
 }
 
@@ -865,6 +996,16 @@ struct Stack {
 impl Stack {
     fn push(&mut self, name: &str, child: Child) {
         self.children.push((name.to_string(), child));
+    }
+
+    /// Stop one named child now, leaving the rest of the stack running, so a
+    /// scenario can observe what that process does on shutdown — the cranker's
+    /// undelegate needs the rollup and base still up.
+    fn stop(&mut self, name: &str) {
+        if let Some(idx) = self.children.iter().position(|(n, _)| n == name) {
+            let (n, mut child) = self.children.remove(idx);
+            terminate(&n, &mut child);
+        }
     }
 }
 

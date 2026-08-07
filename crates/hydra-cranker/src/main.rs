@@ -51,6 +51,7 @@ fn retry_backoff_slots(count: u32) -> u64 {
 }
 
 mod cache;
+mod delegation;
 mod fire;
 mod grpc;
 mod metrics;
@@ -126,6 +127,24 @@ struct Cli {
     /// are skipped by default; this flag opts back in.
     #[arg(long = "unsafe", env = "HYDRA_CRANKER_UNSAFE", default_value_t = false)]
     run_unsafe: bool,
+    /// Base-layer (L1) JSON-RPC endpoint. Required with `--ephemeral`: the
+    /// cranker keypair must be delegated for the rollup to let its balance
+    /// change as the trigger fee payer, and delegating is a base-layer
+    /// transaction. The cranker delegates itself here at startup if needed,
+    /// paying for it out of its own balance. Unused in base mode.
+    #[arg(long, env = "HYDRA_CRANKER_BASE_RPC_URL")]
+    base_rpc_url: Option<String>,
+    /// How long to wait, with `--ephemeral`, for the rollup to report the
+    /// cranker keypair as delegated before giving up and exiting. The cranker
+    /// polls `getDelegationStatus` for this long, covering the lag between the
+    /// base-layer delegation landing and the rollup cloning the account.
+    /// `0` checks exactly once.
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_DELEGATION_TIMEOUT_SECS",
+        default_value_t = 30
+    )]
+    delegation_timeout_secs: u64,
 }
 
 fn default_ws_url(rpc_url: &str) -> String {
@@ -200,6 +219,36 @@ fn main() -> Result<()> {
     // Prometheus metrics endpoint (optional).
     if let Some(port) = args.prometheus_port {
         let _server = metrics::spawn_server(port);
+    }
+
+    // Ephemeral mode requires a delegated cranker: the rollup rejects a fee
+    // payer whose lamports change unless it is delegated, and every `Trigger`
+    // credits the cranker its reward. Fail fast here rather than let the
+    // trigger loop park every crank on `InvalidAccountForFee`. Base mode moves
+    // no fee-payer lamports this way and needs none of it.
+    // Throwaway signer for the shutdown undelegate. It is never a fee payer and
+    // never debited, so it needs no lamports and need not exist on-chain — its
+    // only job is to be an *undelegated* instruction payer, which is what keeps
+    // the magic program off its fee path. See `delegation::undelegate`.
+    let undelegate_payer = Keypair::new();
+
+    if mode::is_ephemeral() {
+        log::info!("undelegate payer = {}", undelegate_payer.pubkey());
+        let url = args.base_rpc_url.clone().ok_or_else(|| {
+            anyhow!("--base-rpc-url is required with --ephemeral (delegating the cranker keypair is a base-layer transaction)")
+        })?;
+        log::info!("base rpc = {}", url);
+        let base = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+        delegation::ensure_delegated(&base, &rpc, &cranker)?;
+        // Landing on the base layer is not the same as the rollup having seen
+        // it; the trigger loop needs the rollup's view.
+        delegation::wait_until_delegated(
+            &rpc,
+            &cranker_pubkey,
+            Duration::from_secs(args.delegation_timeout_secs),
+        )?;
+    } else if args.base_rpc_url.is_some() {
+        log::warn!("--base-rpc-url is ignored without --ephemeral");
     }
 
     // Initial bootstrap so the trigger loop has something to scan even if
@@ -342,8 +391,13 @@ fn main() -> Result<()> {
                 args.priority_fee_micro_lamports,
                 args.trigger_skip_preflight,
             ) {
-                Ok(()) => {
-                    log::info!("slot {}: triggered {}", slot, entry.pubkey);
+                Ok(signature) => {
+                    log::info!(
+                        "slot {}: triggered {} (tx {})",
+                        slot,
+                        entry.pubkey,
+                        signature
+                    );
                     metrics::metrics()
                         .triggers_submitted_total
                         .with_label_values(&["ok"])
@@ -357,8 +411,14 @@ fn main() -> Result<()> {
                     // advanced `next_exec_slot`; submit-Ok alone isn't proof
                     // the tx landed.
                 }
-                Err(e) => {
-                    log::debug!("slot {}: trigger {} dropped: {:#}", slot, entry.pubkey, e);
+                Err(f) => {
+                    log::debug!(
+                        "slot {}: trigger {} dropped (tx {}): {:#}",
+                        slot,
+                        entry.pubkey,
+                        f.signature_str(),
+                        f.error
+                    );
                     metrics::metrics()
                         .triggers_submitted_total
                         .with_label_values(&["err"])
@@ -379,11 +439,13 @@ fn main() -> Result<()> {
                         rec.next_retry_slot = slot + retry_backoff_slots(rec.count);
                         if rec.count == MAX_CONSECUTIVE_FAILURES {
                             log::warn!(
-                                "parking crank {} after {} consecutive failures at slot {}: {:#}",
+                                "parking crank {} after {} consecutive failures at slot {} \
+                                 (last tx {}): {:#}",
                                 entry.pubkey,
                                 rec.count,
                                 entry.next_exec_slot,
-                                e
+                                f.signature_str(),
+                                f.error
                             );
                         }
                     }
@@ -407,16 +469,22 @@ fn main() -> Result<()> {
                 }
             }
             match fire::fire_close(&rpc, &cranker, &entry, args.priority_fee_micro_lamports) {
-                Ok(()) => {
-                    log::info!("slot {}: closed {}", slot, entry.pubkey);
+                Ok(signature) => {
+                    log::info!("slot {}: closed {} (tx {})", slot, entry.pubkey, signature);
                     metrics::metrics()
                         .closes_submitted_total
                         .with_label_values(&["ok"])
                         .inc();
                     last_close_attempt.insert(entry.pubkey, slot);
                 }
-                Err(e) => {
-                    log::debug!("slot {}: close {} dropped: {:#}", slot, entry.pubkey, e);
+                Err(f) => {
+                    log::debug!(
+                        "slot {}: close {} dropped (tx {}): {:#}",
+                        slot,
+                        entry.pubkey,
+                        f.signature_str(),
+                        f.error
+                    );
                     metrics::metrics()
                         .closes_submitted_total
                         .with_label_values(&["err"])
@@ -428,5 +496,16 @@ fn main() -> Result<()> {
     }
 
     shutdown.store(true, Ordering::Relaxed);
+
+    // Release the delegation on the way out, committing the rewards earned on
+    // the rollup back to L1. Best-effort: triggering has already stopped, so a
+    // failure costs nothing this run, and the next startup finds the account
+    // still delegated and skips re-delegating.
+    if mode::is_ephemeral() {
+        if let Err(e) = delegation::undelegate(&rpc, &cranker, &undelegate_payer) {
+            log::warn!("undelegate on shutdown failed, cranker stays delegated: {e:#}");
+        }
+    }
+
     std::process::exit(0);
 }

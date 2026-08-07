@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 hydra-api = { workspace = true, features = ["client", "ephemeral"] }
+ephemeral-rollups-sdk = { version = "0.16", features = ["instruction"] }
+solana-system-interface = { workspace = true }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -20,12 +22,14 @@ ctrlc = "3"
 env_logger = "0.11"
 log = "0.4"
 prometheus = { version = "0.13", default-features = false }
+serde_json = "1"
 tiny_http = "0.12"
 
 solana-client = "=4.0.0-beta.7"
 solana-pubsub-client = "=4.0.0-beta.7"
 solana-rpc-client-api = "=4.0.0-beta.7"
 solana-account-decoder-client-types = "=4.0.0-beta.7"
+solana-transaction-status-client-types = "=4.0.0-beta.7"
 
 solana-pubkey = { workspace = true }
 solana-commitment-config = "3.1"
