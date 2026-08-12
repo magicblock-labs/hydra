@@ -412,13 +412,7 @@ fn main() -> Result<()> {
                     // the tx landed.
                 }
                 Err(f) => {
-                    log::debug!(
-                        "slot {}: trigger {} dropped (tx {}): {:#}",
-                        slot,
-                        entry.pubkey,
-                        f.signature_str(),
-                        f.error
-                    );
+                    log::debug!("slot {}: trigger {} dropped: {:#}", slot, entry.pubkey, f);
                     metrics::metrics()
                         .triggers_submitted_total
                         .with_label_values(&["err"])
@@ -439,13 +433,11 @@ fn main() -> Result<()> {
                         rec.next_retry_slot = slot + retry_backoff_slots(rec.count);
                         if rec.count == MAX_CONSECUTIVE_FAILURES {
                             log::warn!(
-                                "parking crank {} after {} consecutive failures at slot {} \
-                                 (last tx {}): {:#}",
+                                "parking crank {} after {} consecutive failures at slot {}: {:#}",
                                 entry.pubkey,
                                 rec.count,
                                 entry.next_exec_slot,
-                                f.signature_str(),
-                                f.error
+                                f
                             );
                         }
                     }
@@ -478,13 +470,7 @@ fn main() -> Result<()> {
                     last_close_attempt.insert(entry.pubkey, slot);
                 }
                 Err(f) => {
-                    log::debug!(
-                        "slot {}: close {} dropped (tx {}): {:#}",
-                        slot,
-                        entry.pubkey,
-                        f.signature_str(),
-                        f.error
-                    );
+                    log::debug!("slot {}: close {} dropped: {:#}", slot, entry.pubkey, f);
                     metrics::metrics()
                         .closes_submitted_total
                         .with_label_values(&["err"])

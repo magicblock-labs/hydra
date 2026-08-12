@@ -59,7 +59,7 @@ pub fn fire_trigger(
     entry: &CrankEntry,
     priority_fee_micro_lamports: u64,
     skip_preflight: bool,
-) -> Result<()> {
+) -> Result<Signature> {
     let scheduled = ix::scheduled_ixs_from_crank(&entry.data)
         .ok_or_else(|| anyhow!("malformed crank tail for {}", entry.pubkey))?;
     // Same accounts in both programs; only the program ID differs.
@@ -119,7 +119,7 @@ pub fn fire_trigger(
     if skip_preflight {
         confirm_or_fail(rpc, &signature)?;
     }
-    Ok(())
+    Ok(signature)
 }
 
 /// Poll `signature` until the cluster reports a status or the timeout
@@ -172,7 +172,7 @@ pub fn fire_close(
     cranker: &Keypair,
     entry: &CrankEntry,
     priority_fee_micro_lamports: u64,
-) -> Result<()> {
+) -> Result<Signature> {
     // Refund recipient: the authority if set (anti-grief binds it on-chain),
     // otherwise the cranker itself.
     let recipient = if entry.authority == [0u8; 32] {
@@ -214,6 +214,5 @@ pub fn fire_close(
             .with_label_values(&["send_transaction"])
             .inc();
         anyhow::Error::new(e).context("send_transaction")
-    })?;
-    Ok(())
+    })
 }
