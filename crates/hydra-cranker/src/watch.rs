@@ -70,7 +70,8 @@ pub fn spawn_program_watcher(
         while !shutdown.load(Ordering::Relaxed) {
             // Rebuild the RPC handle each attempt in case the previous one
             // is wedged.
-            let rpc = RpcClient::new(rpc_url.clone());
+            let rpc =
+                RpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::processed());
             if let Err(e) = bootstrap(&rpc, &program_id, &cache) {
                 log::warn!("bootstrap failed: {:#}; retrying in 5s", e);
                 thread::sleep(Duration::from_secs(5));
