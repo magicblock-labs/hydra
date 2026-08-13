@@ -11,7 +11,7 @@ use pinocchio::{
 };
 
 use hydra_api::{
-    consts::{CRANKER_REWARD, CRANK_HEADER_SIZE, REMAINING_INFINITE},
+    consts::{base::CRANKER_REWARD, CRANK_HEADER_SIZE, REMAINING_INFINITE},
     HydraError,
 };
 
@@ -37,7 +37,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
     if !cranker_ai.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::ID) {
+    if !crank_ai.owned_by(&hydra_api::base::ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     if ix_sysvar_ai.address() != &INSTRUCTIONS_ID {

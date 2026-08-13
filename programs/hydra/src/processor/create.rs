@@ -88,7 +88,7 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let payer_key = payer.address();
     let (expected_pda, bump) = Address::find_program_address(
         &[CRANK_SEED_PREFIX, payer_key.as_ref(), seed.as_ref()],
-        &hydra_api::ID,
+        &hydra_api::base::ID,
     );
     let payer_bound = crank_ai.address() == &expected_pda;
     // DEPRECATED: legacy unscoped derivation (`[b"crank", seed]`) is squattable.
@@ -96,8 +96,10 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let bump = if payer_bound {
         bump
     } else {
-        let (legacy_pda, legacy_bump) =
-            Address::find_program_address(&[CRANK_SEED_PREFIX, seed.as_ref()], &hydra_api::ID);
+        let (legacy_pda, legacy_bump) = Address::find_program_address(
+            &[CRANK_SEED_PREFIX, seed.as_ref()],
+            &hydra_api::base::ID,
+        );
         if crank_ai.address() != &legacy_pda {
             return Err(ProgramError::InvalidSeeds);
         }

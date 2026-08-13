@@ -24,7 +24,7 @@ const EXAMPLE_SO: &str = concat!(
 const HYDRA_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/deploy/hydra");
 
 fn hydra_id() -> Pubkey {
-    Pubkey::new_from_array(hydra_api::ID.to_bytes())
+    Pubkey::new_from_array(hydra_api::base::ID.to_bytes())
 }
 
 fn require_so(path: &str, how_to_build: &str) -> bool {
@@ -54,7 +54,7 @@ fn schedule_creates_crank_via_cpi_into_hydra() {
     // into its `CreateArgs` (it just passes through the user-supplied seed).
     let seed = [0x33u8; 32];
     let payer = Pubkey::new_unique();
-    let (crank_addr, _bump) = hydra_api::state::find_crank_pda(&payer.to_bytes(), &seed);
+    let (crank_addr, _bump) = hydra_api::state::find_base_crank_pda(&payer.to_bytes(), &seed);
     let crank = Pubkey::new_from_array(crank_addr.to_bytes());
     let target_program_id = Pubkey::new_unique();
 

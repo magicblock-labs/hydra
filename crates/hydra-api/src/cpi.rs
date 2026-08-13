@@ -104,7 +104,7 @@ pub mod pinocchio {
             InstructionAccount::writable(recipient.address()),
         ];
         let ix = InstructionView {
-            program_id: &crate::ID,
+            program_id: &crate::base::ID,
             accounts: &metas,
             data: &data,
         };
@@ -125,7 +125,7 @@ pub mod pinocchio {
             InstructionAccount::writable(recipient.address()),
         ];
         let ix = InstructionView {
-            program_id: &crate::ID,
+            program_id: &crate::base::ID,
             accounts: &metas,
             data: &data,
         };

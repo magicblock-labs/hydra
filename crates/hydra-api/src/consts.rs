@@ -5,12 +5,6 @@
 /// (legacy, deprecated: `[b"crank", seed_bytes]`).
 pub const CRANK_SEED_PREFIX: &[u8] = b"crank";
 
-/// Solana base transaction fee (lamports per signature).
-pub const BASE_FEE_LAMPORTS: u64 = 5_000;
-
-/// Flat per-trigger reward paid to the cranker. Equals `2 × base_fee`.
-pub const CRANKER_REWARD: u64 = 2 * BASE_FEE_LAMPORTS;
-
 /// Max metas a single scheduled ix may declare.
 pub const MAX_ACCOUNTS: usize = 32;
 
@@ -35,13 +29,6 @@ pub const CRANK_HEADER_SIZE: usize = 120;
 /// "don't emit `SetComputeUnitLimit`" (inherits the 200 k/ix default).
 pub const MAX_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
 
-/// Slots of overdue past `next_exec_slot` after which a crank is considered
-/// stuck and `Close` becomes permissionlessly callable. `next_exec_slot` only
-/// advances on successful `Trigger`, so a crank whose inner ix deterministically
-/// fails (or whose target is paused) would otherwise pin its rent forever.
-/// ~10 days at 400 ms/slot: 10 × 86_400 / 0.4 = 2_160_000.
-pub const STALENESS_THRESHOLD_SLOTS: u64 = 2_160_000;
-
 /// Per-meta size in both the on-chain template bytes and the instructions
 /// sysvar wire format: `[1 flag byte][32-byte pubkey]`.
 pub const SERIALIZED_META_SIZE: usize = 33;
@@ -58,4 +45,34 @@ pub mod ix {
     pub const TRIGGER: u8 = 1;
     pub const CANCEL: u8 = 2;
     pub const CLOSE: u8 = 3;
+}
+
+pub mod base {
+    /// Solana base transaction fee (lamports per signature) on the base layer.
+    pub const BASE_FEE_LAMPORTS: u64 = 5_000;
+    /// Flat per-trigger reward paid to the cranker. Equals `2 × base_fee`.
+    pub const CRANKER_REWARD: u64 = 2 * BASE_FEE_LAMPORTS;
+    /// Base-layer slot time (milliseconds per slot).
+    pub const SLOT_FREQUENCY_MS: u64 = 400;
+    /// Slots of overdue past `next_exec_slot` after which a crank is considered
+    /// stuck and `Close` becomes permissionlessly callable. `next_exec_slot` only
+    /// advances on successful `Trigger`, so a crank whose inner ixs deterministically
+    /// fails (or whose target is paused) would otherwise pin its rent forever.
+    /// ~10 days
+    pub const STALENESS_THRESHOLD_SLOTS: u64 = 10 * 86_400_000 / SLOT_FREQUENCY_MS;
+}
+
+pub mod ephemeral {
+    /// Ephemeral cranks are free, use tips to incentivize the cranker.
+    pub const BASE_FEE_LAMPORTS: u64 = 0;
+    /// Flat per-trigger reward paid to the cranker. Equals `2 × base_fee`.
+    pub const CRANKER_REWARD: u64 = 2 * BASE_FEE_LAMPORTS;
+    /// Ephemeral-rollup slot time (milliseconds per slot).
+    pub const SLOT_FREQUENCY_MS: u64 = 50;
+    /// Slots of overdue past `next_exec_slot` after which a crank is considered
+    /// stuck and `Close` becomes permissionlessly callable. `next_exec_slot` only
+    /// advances on successful `Trigger`, so a crank whose inner ixs deterministically
+    /// fails (or whose target is paused) would otherwise pin its rent forever.
+    /// ~10 days
+    pub const STALENESS_THRESHOLD_SLOTS: u64 = 10 * 86_400_000 / SLOT_FREQUENCY_MS;
 }

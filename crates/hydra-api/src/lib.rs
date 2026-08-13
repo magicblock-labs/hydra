@@ -16,6 +16,10 @@ pub use consts::*;
 pub use error::HydraError;
 pub use state::Crank;
 
-use solana_address::declare_id;
+pub mod base {
+    solana_address::declare_id!("Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea");
+}
 
-declare_id!("Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea");
+pub mod ephemeral {
+    solana_address::declare_id!("eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf");
+}
