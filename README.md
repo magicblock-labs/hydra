@@ -93,6 +93,7 @@ Run `make help` to list the available targets. Common commands:
 - `make lint` — run clippy for the workspace, plus the Anchor example check.
 - `make test` — run the main `hydra-tests` suite.
 - `make test-examples` — run the native and Pinocchio example tests.
+- `make test-e2e` — run the live ephemeral-rollup e2e test.
 - `make cu-table` — reproduce the compute-unit table.
 - `make ci` — run the default CI checks locally.
 - `make install-tools` — install `cargo-nextest`.
@@ -434,6 +435,29 @@ let create = ix::create(
                   remaining: 0, priority_tip: 0, cu_limit: 0, scheduled },
 );
 ```
+
+### Live end-to-end test (`tests/e2e`)
+
+The mollusk tests stub the rollup out. `tests/e2e` instead boots the **real**
+three-process stack — `mb-test-validator` (base L1), `ephemeral-validator` (the
+rollup), and `hydra-cranker` — creates a few ephemeral cranks, and asserts the
+cranker fires each one on schedule.
+
+The validators ship as an npm package; `mb-test-validator` wraps
+`solana-test-validator`, so the Solana/Anza toolchain must also be installed:
+
+```sh
+npm install -g @magicblock-labs/ephemeral-validator   # mb-test-validator + ephemeral-validator
+
+# The test is `#[ignore]` (it spawns external validators); run it explicitly.
+# `make test-e2e` builds the on-chain artifacts the rollup clones first. The
+# hydra-cranker is built automatically by the test and run with `--ephemeral`.
+make test-e2e
+```
+
+`tests/e2e` is its own workspace, so `make lint` skips it — `make lint-e2e`
+clippies it separately. CI runs both as the `e2e` job in
+`.github/workflows/ci.yml`.
 
 ## Releasing
 
