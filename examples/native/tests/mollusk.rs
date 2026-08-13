@@ -27,16 +27,24 @@ fn hydra_id() -> Pubkey {
     Pubkey::new_from_array(hydra_api::ID.to_bytes())
 }
 
+fn require_so(path: &str, how_to_build: &str) -> bool {
+    if std::path::Path::new(&format!("{path}.so")).exists() {
+        return true;
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{path}.so not found. {how_to_build}"
+    );
+    eprintln!("skipping: {path}.so not found. {how_to_build}");
+    false
+}
+
 #[test]
 fn schedule_creates_crank_via_cpi_into_hydra() {
-    if !std::path::Path::new(&format!("{HYDRA_SO}.so")).exists() {
-        eprintln!(
-            "skipping: {HYDRA_SO}.so not found. Run `cargo build-sbf` on the Hydra workspace."
-        );
+    if !require_so(HYDRA_SO, "Run `cargo build-sbf` on the Hydra workspace.") {
         return;
     }
-    if !std::path::Path::new(&format!("{EXAMPLE_SO}.so")).exists() {
-        eprintln!("skipping: {EXAMPLE_SO}.so not found. Run `cargo build-sbf` on this crate.");
+    if !require_so(EXAMPLE_SO, "Run `cargo build-sbf` on this crate.") {
         return;
     }
     let mut mollusk = Mollusk::new(&EXAMPLE_ID, EXAMPLE_SO);
