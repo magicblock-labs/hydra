@@ -20,9 +20,7 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-use hydra_example_anchor::{
-    accounts as schedule_accts, instruction as schedule_ix, ID as EXAMPLE_ID,
-};
+use hydra_example_anchor::{accounts as schedule_accts, instruction as schedule_ix, ID as EXAMPLE_ID};
 
 /// Path to the Anchor example `.so` (without extension), relative to this
 /// crate's `CARGO_MANIFEST_DIR`.
@@ -105,7 +103,8 @@ fn schedule_creates_crank_via_cpi_into_hydra() {
     };
 
     let hydra_elf = std::fs::read(format!("{HYDRA_SO}.so")).expect("read hydra .so");
-    let hydra_program_acct = mollusk_svm::program::create_program_account_loader_v2(&hydra_elf);
+    let hydra_program_acct =
+        mollusk_svm::program::create_program_account_loader_v2(&hydra_elf);
 
     let accounts = vec![
         (payer, Account::new(1_000_000_000, 0, &system_program)),

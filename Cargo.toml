@@ -3,6 +3,7 @@ resolver = "2"
 default-members = ["programs/hydra"]
 members = [
     "programs/hydra",
+    "programs/hydra-ephemeral",
     "crates/hydra-api",
     "crates/hydra-cranker",
     "tests",
@@ -25,6 +26,9 @@ repository = "https://github.com/magicblock-labs/hydra"
 pinocchio = { version = "0.10", features = ["cpi"] }
 pinocchio-system = "0.5"
 pinocchio-log = "0.5"
+# CPI helpers for MagicBlock ephemeral accounts (used by the ephemeral-crank
+# instructions). Tracks pinocchio 0.10, which is why the program is pinned to
+# 0.10 rather than 0.11.
 ephemeral-rollups-pinocchio = "0.15"
 solana-address = { version = "2", features = ["decode", "curve25519"] }
 solana-define-syscall = "5.0"
