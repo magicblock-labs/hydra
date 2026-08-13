@@ -26,7 +26,7 @@ pinocchio = { workspace = true }
 pinocchio-system = { workspace = true }
 pinocchio-log = { workspace = true }
 solana-define-syscall = { workspace = true }
-hydra-api = { workspace = true }
+hydra-api = { workspace = true, features = ["program"] }
 
 [package.metadata.solana]
 program-id = "Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea"
