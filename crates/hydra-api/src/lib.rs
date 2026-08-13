@@ -15,7 +15,3 @@ pub mod state;
 pub use consts::*;
 pub use error::HydraError;
 pub use state::Crank;
-
-use solana_address::declare_id;
-
-declare_id!("Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea");

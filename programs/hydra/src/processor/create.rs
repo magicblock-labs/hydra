@@ -82,7 +82,7 @@ pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
 
     // Derive expected PDA and verify match.
     let (expected_pda, bump) =
-        Address::find_program_address(&[CRANK_SEED_PREFIX, seed.as_ref()], &hydra_api::ID);
+        Address::find_program_address(&[CRANK_SEED_PREFIX, seed.as_ref()], &hydra_api::base::ID);
     if crank_ai.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -112,7 +112,7 @@ pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
             to: crank_ai,
             lamports: rent_min,
             space: total_size as u64,
-            owner: &hydra_api::ID,
+            owner: &hydra_api::base::ID,
         }
         .invoke_signed(&signers)?;
     } else {
@@ -137,7 +137,7 @@ pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
         .invoke_signed(&signers)?;
         Assign {
             account: crank_ai,
-            owner: &hydra_api::ID,
+            owner: &hydra_api::base::ID,
         }
         .invoke_signed(&signers)?;
     }

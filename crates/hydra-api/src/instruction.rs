@@ -62,12 +62,12 @@ mod client {
 
     /// Hydra program ID as a `solana_pubkey::Pubkey` (convenience for clients).
     pub fn program_id() -> Pubkey {
-        Pubkey::new_from_array(crate::ID.to_bytes())
+        Pubkey::new_from_array(crate::base::ID.to_bytes())
     }
 
     /// Derive `(crank_pda, bump)` using `solana_pubkey::Pubkey`.
     pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
-        let (addr, bump) = crate::state::find_crank_pda(seed);
+        let (addr, bump) = crate::state::find_base_crank_pda(seed);
         (Pubkey::new_from_array(addr.to_bytes()), bump)
     }
 

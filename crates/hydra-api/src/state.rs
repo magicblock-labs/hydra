@@ -184,9 +184,17 @@ pub unsafe fn load_crank_mut(bytes: &mut [u8]) -> Result<&mut Crank, ProgramErro
 
 /// Derive the crank PDA for the given 32-byte seed.
 #[inline]
-pub fn find_crank_pda(seed: &[u8; 32]) -> (solana_address::Address, u8) {
+pub fn find_base_crank_pda(seed: &[u8; 32]) -> (solana_address::Address, u8) {
     solana_address::Address::find_program_address(
         &[crate::consts::CRANK_SEED_PREFIX, seed.as_ref()],
-        &crate::ID,
+        &crate::base::ID,
+    )
+}
+
+#[inline]
+pub fn find_ephemeral_crank_pda(seed: &[u8; 32]) -> (solana_address::Address, u8) {
+    solana_address::Address::find_program_address(
+        &[crate::consts::CRANK_SEED_PREFIX, seed.as_ref()],
+        &crate::ephemeral::ID,
     )
 }

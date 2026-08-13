@@ -11,7 +11,8 @@ use std::{
 use solana_pubkey::Pubkey;
 
 use hydra_api::consts::{
-    CRANKER_REWARD, CRANK_HEADER_SIZE, SERIALIZED_META_SIZE, STALENESS_THRESHOLD_SLOTS,
+    base::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
+    CRANK_HEADER_SIZE, SERIALIZED_META_SIZE,
 };
 
 /// Minimal decoded projection of a Crank account — just the fields we need
