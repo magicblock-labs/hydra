@@ -1029,14 +1029,21 @@ fn terminate(name: &str, child: &mut Child) {
     let group = format!("-{pid}"); // negative PID = the process group
                                    // `2>/dev/null` equivalent: a group whose members already exited makes
                                    // `kill` print "No such process" — harmless noise we suppress.
+                                   //
+                                   // `-s SIG --` is the portable spelling, and the `--` is load-bearing:
+                                   // procps-ng `kill` (Linux/CI) parses a bare `-<pgid>` as another option
+                                   // rather than a negative PID and **exits 0 without signalling anything**,
+                                   // while BSD `kill` (macOS) accepts it. Ending option parsing makes both
+                                   // read it as a process group. Without this the cranker never saw SIGINT
+                                   // on CI, so it skipped its graceful shutdown (and its undelegate).
     let signal = |sig: &str| {
         let _ = Command::new("kill")
-            .arg(sig)
+            .args(["-s", sig, "--"])
             .arg(&group)
             .stderr(Stdio::null())
             .status();
     };
-    signal("-INT");
+    signal("INT");
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         match child.try_wait() {
@@ -1046,7 +1053,7 @@ fn terminate(name: &str, child: &mut Child) {
         }
     }
     // Force-kill the whole group regardless, to be sure no grandchild lingers.
-    signal("-KILL");
+    signal("KILL");
     let _ = child.kill();
     let _ = child.wait();
     let _ = name;
