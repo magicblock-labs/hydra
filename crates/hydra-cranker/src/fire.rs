@@ -59,10 +59,15 @@ pub fn fire_trigger(
     entry: &CrankEntry,
     priority_fee_micro_lamports: u64,
     skip_preflight: bool,
-) -> Result<()> {
+) -> Result<Signature> {
     let scheduled = ix::scheduled_ixs_from_crank(&entry.data)
         .ok_or_else(|| anyhow!("malformed crank tail for {}", entry.pubkey))?;
-    let trigger = ix::base::trigger(entry.pubkey, cranker.pubkey());
+    // Same accounts in both programs; only the program ID differs.
+    let trigger = if crate::mode::is_ephemeral() {
+        ix::ephemeral::trigger(entry.pubkey, cranker.pubkey())
+    } else {
+        ix::base::trigger(entry.pubkey, cranker.pubkey())
+    };
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {
         metrics::metrics()
             .rpc_errors_total
@@ -114,7 +119,7 @@ pub fn fire_trigger(
     if skip_preflight {
         confirm_or_fail(rpc, &signature)?;
     }
-    Ok(())
+    Ok(signature)
 }
 
 /// Poll `signature` until the cluster reports a status or the timeout
@@ -154,21 +159,32 @@ fn confirm_or_fail(rpc: &RpcClient, signature: &Signature) -> Result<()> {
     }
 }
 
-/// Submit a permissionless `Close`. The cranker keeps the `CRANKER_REWARD`
-/// bounty; the remaining rent goes to `entry.authority` if set, otherwise to
-/// the cranker (on-chain anti-grief check in close.rs).
+/// Submit a `Close`. The cranker keeps the `CRANKER_REWARD` bounty; the
+/// remaining rent goes to `entry.authority` if set, otherwise to the cranker
+/// (on-chain anti-grief check in close.rs).
+///
+/// Permissionless on the base program. The ephemeral one additionally gates an
+/// owned crank's `Close` to its authority, so in that mode callers must have
+/// checked [`CrankEntry::close_reporter_allowed`] first — the cranker signs as
+/// `reporter`, and a Close it isn't authorized for reverts every time.
 pub fn fire_close(
     rpc: &RpcClient,
     cranker: &Keypair,
     entry: &CrankEntry,
     priority_fee_micro_lamports: u64,
-) -> Result<()> {
+) -> Result<Signature> {
+    // Refund recipient: the authority if set (anti-grief binds it on-chain),
+    // otherwise the cranker itself.
     let recipient = if entry.authority == [0u8; 32] {
         cranker.pubkey()
     } else {
         Pubkey::new_from_array(entry.authority)
     };
-    let close = ix::base::close(cranker.pubkey(), entry.pubkey, recipient);
+    let close = if crate::mode::is_ephemeral() {
+        ix::ephemeral::close(cranker.pubkey(), entry.pubkey, recipient)
+    } else {
+        ix::base::close(cranker.pubkey(), entry.pubkey, recipient)
+    };
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {
         metrics::metrics()
             .rpc_errors_total
@@ -198,6 +214,5 @@ pub fn fire_close(
             .with_label_values(&["send_transaction"])
             .inc();
         anyhow::Error::new(e).context("send_transaction")
-    })?;
-    Ok(())
+    })
 }
