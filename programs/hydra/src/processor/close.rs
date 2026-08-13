@@ -7,7 +7,7 @@
 use pinocchio::{error::ProgramError, AccountView, ProgramResult};
 
 use hydra_api::{
-    consts::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
+    consts::base::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
     state::load_crank,
     HydraError,
 };
@@ -22,7 +22,7 @@ pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     if !reporter.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::ID) {
+    if !crank_ai.owned_by(&hydra_api::base::ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
 

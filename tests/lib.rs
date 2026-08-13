@@ -40,7 +40,7 @@ pub const NOOP_ID: Pubkey = pubkey!("4sdZFwGE7TkQCJVpfggvfy2ZwGNCfF6hAMJYjZU5HpZ
 pub const NOOP_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/hydra_noop");
 
 pub fn hydra_id() -> Pubkey {
-    Pubkey::new_from_array(hydra_api::ID.to_bytes())
+    Pubkey::new_from_array(hydra_api::base::ID.to_bytes())
 }
 
 pub fn mollusk_with_hydra() -> Mollusk {
@@ -57,7 +57,7 @@ pub fn load_noop(mollusk: &mut Mollusk) {
 }
 
 pub fn find_crank(seed: &[u8; 32]) -> (Pubkey, u8) {
-    let (addr, bump) = hydra_api::state::find_crank_pda(seed);
+    let (addr, bump) = hydra_api::state::find_base_crank_pda(seed);
     (Pubkey::new_from_array(addr.to_bytes()), bump)
 }
 
@@ -479,7 +479,9 @@ pub fn print_cu_table() {
 #[cfg(test)]
 mod tests {
     use hydra_api::{
-        instruction::CreateArgs, state::region_len_for, CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS,
+        consts::base::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
+        instruction::CreateArgs,
+        state::region_len_for,
     };
 
     use super::*;
