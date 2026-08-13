@@ -53,11 +53,13 @@ build-anchor: ## anchor build the anchor example (needs the anchor CLI)
 # ---------------------------------------------------------------------------
 .PHONY: fmt fmt-check lint
 
-fmt: ## Format the workspace
+fmt: ## Format the workspace and the excluded anchor example
 	cargo fmt --all
+	cargo fmt --manifest-path $(ANCHOR_MANIFEST) --all
 
 fmt-check: ## Check formatting without writing (CI)
 	cargo fmt --all --check
+	cargo fmt --manifest-path $(ANCHOR_MANIFEST) --all --check
 
 lint: ## Clippy the workspace and check the excluded anchor example
 	cargo clippy --workspace $(CLIPPY)
