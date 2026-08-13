@@ -1,7 +1,7 @@
 //! `Close` (disc 3) — permissionless cleanup of exhausted / underfunded /
 //! stuck cranks. A crank is "stuck" when `next_exec_slot` has fallen more
 //! than `STALENESS_THRESHOLD_SLOTS` behind the current slot, which means no
-//! cranker has successfully fired it in ~31 days — almost always because the
+//! cranker has successfully fired it in ~10 days — almost always because the
 //! inner ix deterministically fails.
 
 use pinocchio::{error::ProgramError, AccountView, ProgramResult};
