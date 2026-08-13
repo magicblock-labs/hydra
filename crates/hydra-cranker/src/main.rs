@@ -22,10 +22,13 @@ use solana_signer::Signer;
 /// Consecutive failures at the same `next_exec_slot` before a crank is parked.
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
-/// Slots to skip a crank after a successful submit. Absorbs the in-flight
-/// window where both our cache and the RPC's preflight bank are stale; without
-/// it, a second fire within the window lands as `NotYetExecutable` (0x1).
-const POST_SUBMIT_COOLDOWN_SLOTS: u64 = 3;
+/// Backstop floor between fires of the same crank, on top of the optimistic
+/// `next_exec_slot` advance done on every successful submit (see
+/// `cache::advance_after_trigger`). That advance is what normally gates re-fire
+/// to the crank's own `interval_slots`; this only matters when it can't move the
+/// schedule — `interval_slots == 0` ("every slot") cranks — where it caps the
+/// blind retry rate at one fire per slot until the `programSubscribe` echo lands.
+const POST_SUBMIT_COOLDOWN_SLOTS: u64 = 1;
 
 /// Slots between Close attempts on the same crank. Close is one-shot: success
 /// purges the crank from the cache, so this map only tracks race losers.
@@ -48,13 +51,14 @@ fn retry_backoff_slots(count: u32) -> u64 {
 }
 
 mod cache;
+mod delegation;
 mod fire;
 mod grpc;
 mod metrics;
+mod mode;
 mod watch;
 
 use cache::new_cache;
-use hydra_api::instruction as ix;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -109,6 +113,12 @@ struct Cli {
         default_value_t = false
     )]
     trigger_skip_preflight: bool,
+    /// Target Hydra's ephemeral-rollup program instead of the base-layer one.
+    /// Switches the watched program ID, the `Close` account layout, and the
+    /// funding/eligibility model (ephemeral cranks hold zero lamports). Point
+    /// `--rpc-url` at a MagicBlock ephemeral validator.
+    #[arg(long, env = "HYDRA_CRANKER_EPHEMERAL", default_value_t = false)]
+    ephemeral: bool,
     /// Run *every* eligible crank, including ones whose scheduled instructions
     /// reference the cranker's own pubkey. Such cranks can't actually fire — as
     /// the fee payer the cranker is promoted to signer + writable, so the
@@ -117,6 +127,24 @@ struct Cli {
     /// are skipped by default; this flag opts back in.
     #[arg(long = "unsafe", env = "HYDRA_CRANKER_UNSAFE", default_value_t = false)]
     run_unsafe: bool,
+    /// Base-layer (L1) JSON-RPC endpoint. Required with `--ephemeral`: the
+    /// cranker keypair must be delegated for the rollup to let its balance
+    /// change as the trigger fee payer, and delegating is a base-layer
+    /// transaction. The cranker delegates itself here at startup if needed,
+    /// paying for it out of its own balance. Unused in base mode.
+    #[arg(long, env = "HYDRA_CRANKER_BASE_RPC_URL")]
+    base_rpc_url: Option<String>,
+    /// How long to wait, with `--ephemeral`, for the rollup to report the
+    /// cranker keypair as delegated before giving up and exiting. The cranker
+    /// polls `getDelegationStatus` for this long, covering the lag between the
+    /// base-layer delegation landing and the rollup cloning the account.
+    /// `0` checks exactly once.
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_DELEGATION_TIMEOUT_SECS",
+        default_value_t = 30
+    )]
+    delegation_timeout_secs: u64,
 }
 
 fn default_ws_url(rpc_url: &str) -> String {
@@ -155,9 +183,14 @@ fn main() -> Result<()> {
         .init();
 
     let args = Cli::parse();
+    mode::init(args.ephemeral);
     let cranker = load_keypair(&args.keypair)?;
     let cranker_pubkey = cranker.pubkey();
     log::info!("cranker pubkey = {}", cranker_pubkey);
+    log::info!(
+        "mode = {}",
+        if args.ephemeral { "ephemeral" } else { "base" }
+    );
     if args.run_unsafe {
         log::warn!("--unsafe: running cranks that reference the cranker's own pubkey");
     }
@@ -172,7 +205,7 @@ fn main() -> Result<()> {
     log::info!("rpc = {}", args.rpc_url);
     log::info!("ws  = {}", ws_url);
 
-    let program_id = ix::base::PROGRAM_ID;
+    let program_id = mode::program_id();
     let cache = new_cache();
     let shutdown = Arc::new(AtomicBool::new(false));
     // `at_slot` anchors each counter to an observed `next_exec_slot`: once
@@ -186,6 +219,36 @@ fn main() -> Result<()> {
     // Prometheus metrics endpoint (optional).
     if let Some(port) = args.prometheus_port {
         let _server = metrics::spawn_server(port);
+    }
+
+    // Ephemeral mode requires a delegated cranker: the rollup rejects a fee
+    // payer whose lamports change unless it is delegated, and every `Trigger`
+    // credits the cranker its reward. Fail fast here rather than let the
+    // trigger loop park every crank on `InvalidAccountForFee`. Base mode moves
+    // no fee-payer lamports this way and needs none of it.
+    // Throwaway signer for the shutdown undelegate. It is never a fee payer and
+    // never debited, so it needs no lamports and need not exist on-chain — its
+    // only job is to be an *undelegated* instruction payer, which is what keeps
+    // the magic program off its fee path. See `delegation::undelegate`.
+    let undelegate_payer = Keypair::new();
+
+    if mode::is_ephemeral() {
+        log::info!("undelegate payer = {}", undelegate_payer.pubkey());
+        let url = args.base_rpc_url.clone().ok_or_else(|| {
+            anyhow!("--base-rpc-url is required with --ephemeral (delegating the cranker keypair is a base-layer transaction)")
+        })?;
+        log::info!("base rpc = {}", url);
+        let base = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
+        delegation::ensure_delegated(&base, &rpc, &cranker)?;
+        // Landing on the base layer is not the same as the rollup having seen
+        // it; the trigger loop needs the rollup's view.
+        delegation::wait_until_delegated(
+            &rpc,
+            &cranker_pubkey,
+            Duration::from_secs(args.delegation_timeout_secs),
+        )?;
+    } else if args.base_rpc_url.is_some() {
+        log::warn!("--base-rpc-url is ignored without --ephemeral");
     }
 
     // Initial bootstrap so the trigger loop has something to scan even if
@@ -202,12 +265,7 @@ fn main() -> Result<()> {
         cache.clone(),
         shutdown.clone(),
     );
-    let _slot_thread = watch::spawn_slot_watcher(
-        args.rpc_url.clone(),
-        ws_url,
-        shutdown.clone(),
-        slot_tx.clone(),
-    );
+    let _slot_thread = watch::spawn_slot_watcher(ws_url, shutdown.clone(), slot_tx.clone());
 
     // Optional Yellowstone gRPC source. Strictly additive — feeds the same
     // cache and slot channel as the WS watchers, so whichever delivers an
@@ -270,7 +328,9 @@ fn main() -> Result<()> {
             let mut elig = Vec::new();
             let mut clos = Vec::new();
             for entry in guard.values() {
-                if entry.is_closable(slot) {
+                let closable_by_us =
+                    !mode::is_ephemeral() || entry.close_reporter_allowed(&cranker_pubkey);
+                if entry.is_closable(slot) && closable_by_us {
                     clos.push(entry.clone());
                 } else if entry.is_eligible(slot) {
                     // A crank that references the cranker's own pubkey can never
@@ -331,19 +391,28 @@ fn main() -> Result<()> {
                 args.priority_fee_micro_lamports,
                 args.trigger_skip_preflight,
             ) {
-                Ok(()) => {
-                    log::info!("slot {}: triggered {}", slot, entry.pubkey);
+                Ok(signature) => {
+                    log::info!(
+                        "slot {}: triggered {} (tx {})",
+                        slot,
+                        entry.pubkey,
+                        signature
+                    );
                     metrics::metrics()
                         .triggers_submitted_total
                         .with_label_values(&["ok"])
                         .inc();
                     last_submit.insert(entry.pubkey, slot);
+                    // Replay `Trigger`'s schedule advance in our cache now, so
+                    // the crank's next fire follows its `interval_slots` instead
+                    // of stalling until the `programSubscribe` echo catches up.
+                    cache::advance_after_trigger(&cache, entry.pubkey, entry.next_exec_slot);
                     // Failure record clears only when the cache observes an
                     // advanced `next_exec_slot`; submit-Ok alone isn't proof
                     // the tx landed.
                 }
-                Err(e) => {
-                    log::debug!("slot {}: trigger {} dropped: {:#}", slot, entry.pubkey, e);
+                Err(f) => {
+                    log::debug!("slot {}: trigger {} dropped: {:#}", slot, entry.pubkey, f);
                     metrics::metrics()
                         .triggers_submitted_total
                         .with_label_values(&["err"])
@@ -368,7 +437,7 @@ fn main() -> Result<()> {
                                 entry.pubkey,
                                 rec.count,
                                 entry.next_exec_slot,
-                                e
+                                f
                             );
                         }
                     }
@@ -392,15 +461,16 @@ fn main() -> Result<()> {
                 }
             }
             match fire::fire_close(&rpc, &cranker, &entry, args.priority_fee_micro_lamports) {
-                Ok(()) => {
-                    log::info!("slot {}: closed {}", slot, entry.pubkey);
+                Ok(signature) => {
+                    log::info!("slot {}: closed {} (tx {})", slot, entry.pubkey, signature);
                     metrics::metrics()
                         .closes_submitted_total
                         .with_label_values(&["ok"])
                         .inc();
+                    last_close_attempt.insert(entry.pubkey, slot);
                 }
-                Err(e) => {
-                    log::debug!("slot {}: close {} dropped: {:#}", slot, entry.pubkey, e);
+                Err(f) => {
+                    log::debug!("slot {}: close {} dropped: {:#}", slot, entry.pubkey, f);
                     metrics::metrics()
                         .closes_submitted_total
                         .with_label_values(&["err"])
@@ -412,5 +482,16 @@ fn main() -> Result<()> {
     }
 
     shutdown.store(true, Ordering::Relaxed);
+
+    // Release the delegation on the way out, committing the rewards earned on
+    // the rollup back to L1. Best-effort: triggering has already stopped, so a
+    // failure costs nothing this run, and the next startup finds the account
+    // still delegated and skips re-delegating.
+    if mode::is_ephemeral() {
+        if let Err(e) = delegation::undelegate(&rpc, &cranker, &undelegate_payer) {
+            log::warn!("undelegate on shutdown failed, cranker stays delegated: {e:#}");
+        }
+    }
+
     std::process::exit(0);
 }
