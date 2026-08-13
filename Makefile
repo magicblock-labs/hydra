@@ -11,6 +11,7 @@
 #   - Rust + `cargo build-sbf` (Solana/Anza toolchain)
 #   - cargo-nextest         -> `make install-tools`
 #   - anchor CLI            -> only for `make build-anchor` / `make test-anchor`
+#   - @magicblock-labs/ephemeral-validator (npm) -> only for `make test-e2e`
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -22,6 +23,7 @@ NOOP_MANIFEST      := tests/programs/noop/Cargo.toml
 NATIVE_MANIFEST    := examples/native/Cargo.toml
 PINOCCHIO_MANIFEST := examples/pinocchio/Cargo.toml
 ANCHOR_MANIFEST    := examples/anchor/Cargo.toml
+E2E_MANIFEST       := tests/e2e/Cargo.toml
 
 HYDRA_FEATURES := logging,cu-trace
 EPHEMERAL_FEATURES := logging
@@ -59,7 +61,7 @@ build-anchor: ## anchor build the anchor example (needs the anchor CLI)
 # ---------------------------------------------------------------------------
 # Format & lint (mirrors the fmt + default CI jobs).
 # ---------------------------------------------------------------------------
-.PHONY: fmt fmt-check lint
+.PHONY: fmt fmt-check lint lint-e2e
 
 fmt: ## Format the workspace and the excluded anchor example
 	cargo fmt --all
@@ -75,11 +77,14 @@ lint: ## Clippy the workspace, both programs' optional features, and the anchor 
 	cargo clippy -p hydra-ephemeral --features $(EPHEMERAL_FEATURES) $(CLIPPY)
 	cargo clippy --manifest-path $(ANCHOR_MANIFEST) $(CLIPPY)
 
+lint-e2e: ## Clippy only the e2e crate
+	cargo clippy --manifest-path $(E2E_MANIFEST) $(CLIPPY)
+
 # ---------------------------------------------------------------------------
 # Test. `hydra-tests` and the example mollusk tests load the compiled .so
 # files at runtime, so the build targets are prerequisites.
 # ---------------------------------------------------------------------------
-.PHONY: test test-examples test-anchor test-all bench cu-table
+.PHONY: test test-examples test-anchor test-e2e test-all bench cu-table
 
 test: build build-examples ## Run every workspace test (via nextest)
 	cargo nextest run --workspace
@@ -90,7 +95,10 @@ test-examples: build build-examples ## Run just the native + pinocchio example m
 test-anchor: build build-anchor ## Run the anchor example mollusk test (needs the anchor CLI)
 	cd examples/anchor && anchor run test
 
-test-all: test test-anchor ## Run the workspace tests plus the anchor example test
+test-e2e: build ## Live e2e: spawns validators + cranker (needs the ephemeral-validator npm pkg)
+	cargo test --manifest-path $(E2E_MANIFEST) -- --ignored --nocapture --test-threads=1
+
+test-all: test test-examples test-anchor test-e2e ## Run hydra-tests, examples, anchor, and live e2e
 
 bench: build ## Run the compute-unit benchmarks
 	cargo bench -p hydra-tests
