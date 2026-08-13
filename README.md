@@ -240,6 +240,30 @@ deposit is always recoverable.
 
 ## Running the Cranker
 
+### Install
+
+Each release publishes a prebuilt `hydra-cranker` binary as a per-platform npm
+package, plus the same binaries as GitHub release assets. Pick the package that
+matches your machine:
+
+```sh
+npm install -g @magicblock-labs/hydra-cranker-linux-x64     # linux, x86_64
+npm install -g @magicblock-labs/hydra-cranker-linux-arm64    # linux, aarch64
+npm install -g @magicblock-labs/hydra-cranker-darwin-x64     # macOS, Intel
+npm install -g @magicblock-labs/hydra-cranker-darwin-arm64   # macOS, Apple silicon
+```
+
+npm's `os`/`cpu` metadata pins each package to its platform, so listing them all
+as `optionalDependencies` also works — npm installs only the one that applies.
+
+Or build from source:
+
+```sh
+cargo install --git https://github.com/magicblock-labs/hydra hydra-cranker
+```
+
+### Usage
+
 The cranker is event-driven and uses WebSocket subscriptions for account and
 slot updates. Optionally, a Yellowstone gRPC endpoint can be wired in
 alongside the WS subs (`--grpc-url`) for redundancy and lower latency.
