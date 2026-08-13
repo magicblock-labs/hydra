@@ -1,4 +1,4 @@
-//! Tiny utilities that don't fit into any one processor.
+//! Tiny syscall utilities shared by the on-chain processors.
 
 use pinocchio::error::ProgramError;
 #[cfg(target_os = "solana")]

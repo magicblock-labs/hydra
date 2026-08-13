@@ -3,7 +3,6 @@
 #[cfg(not(feature = "no-entrypoint"))]
 mod entrypoint;
 
-mod helpers;
 mod processor;
 
-pub use hydra_api::base::ID;
+pub use hydra_api::base::*;
