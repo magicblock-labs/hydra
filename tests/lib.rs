@@ -494,11 +494,13 @@ pub fn print_cu_table() {
 
 #[cfg(test)]
 mod tests {
+    use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
     use hydra_api::{
         consts::{base, ephemeral},
         instruction::CreateArgs,
         state::region_len_for,
     };
+    use mollusk_svm::result::types::TransactionProgramResult;
 
     use super::*;
 
@@ -893,6 +895,106 @@ mod tests {
         assert_eq!(header.executed(), 1, "executed++");
         assert_eq!(header.remaining(), 9, "remaining--");
         assert_eq!(header.next_exec_slot(), 100, "slot advanced by interval");
+    }
+
+    #[test]
+    fn ephemeral_close_gates_owned_cranks_to_their_authority() {
+        const UNAUTHORIZED_AUTHORITY: u64 = 4;
+        const NOT_CLOSABLE: u64 = 5;
+
+        // A crank minted by the base program, re-owned to the ephemeral one —
+        // same trick as `ephemeral_trigger_pays_cranker`, since ephemeral
+        // `Create` needs the Magic program that mollusk doesn't have.
+        let mint_eph_crank = |authority: [u8; 32]| -> Account {
+            let base = mollusk_with_hydra();
+            let payer = Pubkey::new_unique();
+            let (crank_pda, _bump) = find_crank(&SEED);
+            let create = create_ix(
+                payer,
+                crank_pda,
+                SEED,
+                authority,
+                0,   // start_slot
+                100, // interval_slots
+                10,  // remaining — not exhausted
+                0,   // priority_tip — keeps `underfunded` false at the base rent floor
+                0,   // cu_limit
+                memo::ID,
+                &[],
+                b"tick",
+            );
+            let (system_program, system_program_acct) = keyed_account_for_system_program();
+            let (memo_id, memo_acct) = memo::keyed_account();
+            let accounts = vec![
+                (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+                (crank_pda, Account::default()),
+                (memo_id, memo_acct),
+                (system_program, system_program_acct),
+            ];
+            let after = base.process_transaction_instructions(&[create], &accounts);
+            assert!(
+                after.raw_result.is_ok(),
+                "base create failed: {:?}",
+                after.raw_result
+            );
+            let mut crank_acct = after
+                .resulting_accounts
+                .into_iter()
+                .find(|(k, _)| k == &crank_pda)
+                .map(|(_, a)| a)
+                .expect("crank after create");
+            crank_acct.owner = eph_id();
+            crank_acct
+        };
+
+        let eph = mollusk_with_hydra_ephemeral();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let vault = Pubkey::new_from_array(EPHEMERAL_VAULT_ID.to_bytes());
+        let magic = Pubkey::new_from_array(MAGIC_PROGRAM_ID.to_bytes());
+
+        let run = |crank_acct: Account, reporter: Pubkey, recipient: Pubkey| {
+            let close = hydra_api::instruction::ephemeral::close(reporter, crank_pda, recipient);
+            let accounts = vec![
+                (reporter, Account::new(0, 0, &system_program)),
+                (crank_pda, crank_acct),
+                (recipient, Account::new(0, 0, &system_program)),
+                (vault, Account::default()),
+                (magic, Account::default()),
+                (system_program, system_program_acct.clone()),
+            ];
+            match eph
+                .process_transaction_instructions(&[close], &accounts)
+                .program_result
+            {
+                TransactionProgramResult::Failure(_, err) => u64::from(err),
+                other => panic!("expected a program failure, got {other:?}"),
+            }
+        };
+
+        // 1. Owned crank, wrong reporter -> stopped by the gate.
+        let authority = Pubkey::new_unique();
+        let imposter = Pubkey::new_unique();
+        let code = run(mint_eph_crank(authority.to_bytes()), imposter, authority);
+        assert_eq!(
+            code, UNAUTHORIZED_AUTHORITY,
+            "imposter must be stopped by the authority gate"
+        );
+
+        // 2. Owned crank, the authority itself -> past the gate.
+        let code = run(mint_eph_crank(authority.to_bytes()), authority, authority);
+        assert_eq!(
+            code, NOT_CLOSABLE,
+            "the authority should clear the gate and be stopped by the closable check"
+        );
+
+        // 3. Unowned crank, arbitrary reporter -> past the gate, still permissionless.
+        let recipient = Pubkey::new_unique();
+        let code = run(mint_eph_crank([0u8; 32]), imposter, recipient);
+        assert_eq!(
+            code, NOT_CLOSABLE,
+            "unowned cranks must stay permissionlessly closable"
+        );
     }
 
     #[test]

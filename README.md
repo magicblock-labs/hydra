@@ -93,7 +93,6 @@ Run `make help` to list the available targets. Common commands:
 - `make lint` — run clippy for the workspace, plus the Anchor example check.
 - `make test` — run the main `hydra-tests` suite.
 - `make test-examples` — run the native and Pinocchio example tests.
-- `make test-e2e` — run the live ephemeral-rollup e2e test.
 - `make cu-table` — reproduce the compute-unit table.
 - `make ci` — run the default CI checks locally.
 - `make install-tools` — install `cargo-nextest`.
@@ -120,11 +119,16 @@ make ci
 
 Use `hydra-api` from clients or from your own on-chain program.
 
-| Use case                      | Feature         | API                            |
-| ----------------------------- | --------------- | ------------------------------ |
-| Host-side client              | `client`        | `Instruction` builders         |
-| `solana-program` / Anchor CPI | `cpi-native`    | `hydra_api::cpi::native::*`    |
-| Pinocchio CPI                 | `cpi-pinocchio` | `hydra_api::cpi::pinocchio::*` |
+| Use case                      | Feature         | API                                  |
+| ----------------------------- | --------------- | ------------------------------------ |
+| Host-side client              | `client`        | `Instruction` builders               |
+| `solana-program` / Anchor CPI | `cpi-native`    | `hydra_api::cpi::base::native::*`    |
+| Pinocchio CPI                 | `cpi-pinocchio` | `hydra_api::cpi::base::pinocchio::*` |
+
+Both the builders and the CPI helpers are split by target ledger: `base::*`
+drives the base-layer program, and `ephemeral::*` (behind the extra `ephemeral`
+feature) drives the [ephemeral-rollup
+program](#ephemeral-rollup-crank-hydra-ephemeral-program).
 
 `Trigger` is not exposed as a CPI helper. It must be sent as a top-level
 instruction.
@@ -248,14 +252,6 @@ hydra-cranker \
   --rpc-url https://your.rpc.example \
   --ws-url wss://your.rpc.example
 
-# Against a MagicBlock ephemeral rollup. `--ephemeral` switches the target
-# program, the `Close` account layout, and the (zero-lamport) funding model at
-# runtime — the same binary drives either program, no rebuild needed.
-hydra-cranker \
-  --keypair ~/.config/solana/cranker.json \
-  --rpc-url https://your.rollup.example \
-  --ephemeral
-
 # With Prometheus metrics at http://0.0.0.0:9100/metrics
 # and JSON health at http://0.0.0.0:9100/healthz
 hydra-cranker \
@@ -353,11 +349,17 @@ base-layer `hydra` program neither contains this code nor depends on
 `ephemeral-rollups-pinocchio`; the two programs share their schedule/verify
 logic through [`hydra_api::program`].
 
-The economic model is identical to the base crank — the cranker is paid
-`CRANKER_REWARD + priority_tip` out of the crank's lamport balance on `Trigger`,
-and `Cancel`/`Close` pay out the leftover balance — with two differences the ER
-forces:
+The economic model follows the same shape as the base crank — the cranker is
+paid `CRANKER_REWARD + priority_tip` out of the crank's lamport balance on
+`Trigger`, and `Cancel`/`Close` pay out the leftover balance — with three
+differences the ER forces:
 
+- **The tip is the whole reward.** ER transactions carry no base fee, so
+  `consts::ephemeral::CRANKER_REWARD` is `0` (against `10_000` on base) and the
+  crank's `priority_tip` is the cranker's *only* incentive. A crank created with
+  `priority_tip: 0` pays its cranker nothing, and the flat `Close` bounty is
+  likewise `0` — a reporter tearing down an unowned crank is paid by the vault
+  rent refund, not by the crank balance.
 - **Vault rent is separate from the crank balance.** The ephemeral account's rent
   (a flat per-byte fee) is paid by a sponsor into a shared vault, not held in the
   account, so the crank's stored `rent_min` is `0`. The crank still holds a plain
@@ -369,7 +371,7 @@ forces:
   scheduled-ix tail in one instruction. `Cancel`/`Close` first drain the crank's
   leftover lamports to a `recipient` (the same bounty/refund split as base), then
   CPI Magic `close` to deallocate the account and refund the vault rent to the
-  sponsor.
+  teardown's signer.
 
 Lifecycle: `Create` → `Trigger` (+ scheduled siblings, run top-level on the ER) →
 `Cancel` (authority-gated) / `Close` (exhausted, underfunded, or stuck). On
@@ -378,8 +380,8 @@ to whoever signs the teardown. Because the Magic program refunds the vault rent
 to the teardown's signer, `Close` is only *permissionless for unowned cranks*
 (`authority == 0`): when a non-zero `authority` is set, only that authority may
 `Close` the crank (and only that authority may be the `recipient`), so the whole
-teardown — bounty, leftover balance, and vault rent — stays with the owner rather
-than an arbitrary reporter. Unowned cranks stay permissionlessly closable by
+teardown — leftover balance and vault rent — stays with the owner rather than an
+arbitrary reporter. Unowned cranks stay permissionlessly closable by
 anyone. The crank PDA derivation (`[b"crank", seed]`) and the on-chain `Crank`
 layout are unchanged, so the template / verification model is identical.
 
@@ -397,8 +399,9 @@ program.
 |    3 | `Close`   | `reporter(w,s), crank(w), recipient(w), vault(w), magic_program`  | none             |
 
 `vault` is the ephemeral rent vault and `magic_program` is MagicBlock's Magic
-program; `hydra-api` exposes both as `consts::magic::EPHEMERAL_VAULT_ID` /
-`MAGIC_PROGRAM_ID`, and the `client`-feature builder fills them in. `sponsor` must
+program; `hydra-api` re-exports both under its `ephemeral` feature as
+`consts::magic::EPHEMERAL_VAULT_ID` / `MAGIC_PROGRAM_ID`, and the
+`client`-feature builder fills them in. `sponsor` must
 be an account delegated to the ER (it pays the rent and sets `authority_signer`).
 
 Build an ephemeral `Create` with the same `CreateArgs` as base `create`:
@@ -414,28 +417,6 @@ let create = ix::create(
                   remaining: 0, priority_tip: 0, cu_limit: 0, scheduled },
 );
 ```
-
-### Build & test
-
-#### Live end-to-end test (`tests/e2e`)
-
-`tests/e2e` instead boots the **real** three-process stack — `mb-test-validator` (base L1),
-`ephemeral-validator` (the rollup), and `hydra-cranker` — creates a few ephemeral cranks, and
-asserts the cranker fires each one on schedule.
-
-The validators ship as an npm package; `mb-test-validator` wraps
-`solana-test-validator`, so the Solana/Anza toolchain must also be installed:
-
-```sh
-npm install -g @magicblock-labs/ephemeral-validator   # mb-test-validator + ephemeral-validator
-
-# The test is `#[ignore]` (it spawns external validators); run it explicitly.
-# `make test-e2e` builds the on-chain artifacts the rollup clones first. The
-# hydra-cranker is built automatically by the test and run with `--ephemeral`.
-make test-e2e
-```
-
-CI runs this as the `e2e` job in `.github/workflows/ci.yml`.
 
 ## Releasing
 

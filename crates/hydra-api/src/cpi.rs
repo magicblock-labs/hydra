@@ -1,7 +1,9 @@
 //! On-chain CPI wrappers for integrators who want to invoke Hydra from
 //! their own program.
 //!
-//! `native` is for `solana-program` / Anchor callers.
+//! Outer module picks the ledger: [`base`] targets the base-layer program,
+//! [`ephemeral`] (behind the `ephemeral` feature) the ephemeral-rollup one.
+//! Inside each, `native` is for `solana-program` / Anchor callers and
 //! `pinocchio` is for Pinocchio callers.
 //!
 //! `Trigger` is not exposed here. It must be sent as a top-level instruction.

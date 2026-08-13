@@ -24,6 +24,7 @@ PINOCCHIO_MANIFEST := examples/pinocchio/Cargo.toml
 ANCHOR_MANIFEST    := examples/anchor/Cargo.toml
 
 HYDRA_FEATURES := logging,cu-trace
+EPHEMERAL_FEATURES := logging
 
 CLIPPY := --all-targets -- -D warnings
 
@@ -58,7 +59,7 @@ build-anchor: ## anchor build the anchor example (needs the anchor CLI)
 # ---------------------------------------------------------------------------
 # Format & lint (mirrors the fmt + default CI jobs).
 # ---------------------------------------------------------------------------
-.PHONY: fmt fmt-check lint lint-ephemeral
+.PHONY: fmt fmt-check lint
 
 fmt: ## Format the workspace and the excluded anchor example
 	cargo fmt --all
@@ -68,9 +69,10 @@ fmt-check: ## Check formatting without writing (CI)
 	cargo fmt --all --check
 	cargo fmt --manifest-path $(ANCHOR_MANIFEST) --all --check
 
-lint: ## Clippy the workspace, hydra's optional features, and the anchor example
+lint: ## Clippy the workspace, both programs' optional features, and the anchor example
 	cargo clippy --workspace $(CLIPPY)
 	cargo clippy -p hydra --features $(HYDRA_FEATURES) $(CLIPPY)
+	cargo clippy -p hydra-ephemeral --features $(EPHEMERAL_FEATURES) $(CLIPPY)
 	cargo clippy --manifest-path $(ANCHOR_MANIFEST) $(CLIPPY)
 
 # ---------------------------------------------------------------------------

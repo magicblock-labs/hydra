@@ -26,3 +26,4 @@ solana-system-interface = { workspace = true }
 
 [dev-dependencies]
 solana-logger = { workspace = true }
+ephemeral-rollups-pinocchio = { workspace = true }
