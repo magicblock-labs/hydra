@@ -27,7 +27,7 @@ const OFF_EXECUTED: usize = 96;
 const OFF_RENT_MIN: usize = 104;
 const OFF_REGION_LEN: usize = 112;
 
-pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
+pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     cu_mark(); // 0  — before any work
 
     let [crank_ai, cranker_ai, ix_sysvar_ai] = accounts else {
@@ -105,7 +105,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
     // SAFETY: `crank_ai` is owned by this program and has at least
     // `CRANK_HEADER_SIZE` bytes (checked above). No other borrow is live.
     unsafe {
-        let p = crank_ai.data_mut_ptr();
+        let p = crank_ai.data_ptr();
         write_u64(p.add(OFF_NEXT_EXEC_SLOT), next_slot);
         write_u64(p.add(OFF_EXECUTED), hdr.executed + 1);
         if hdr.remaining != REMAINING_INFINITE {

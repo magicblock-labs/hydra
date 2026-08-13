@@ -22,12 +22,9 @@ use pinocchio::{
     cpi::{Seed, Signer},
     error::ProgramError,
     sysvars::{rent::Rent, Sysvar},
-    AccountView, Address, ProgramResult, UnsafeResize,
+    AccountView, Address, ProgramResult,
 };
-#[cfg(not(feature = "create-account-allow-prefund"))]
 use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
-#[cfg(feature = "create-account-allow-prefund")]
-use pinocchio_system::instructions::{CreateAccountAllowPrefund, Funding};
 
 use hydra_api::{
     consts::{
@@ -39,7 +36,7 @@ use hydra_api::{
     HydraError,
 };
 
-pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     let [payer, crank_ai, _system_program] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -105,65 +102,44 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     ];
     let signers = [Signer::from(&seeds_arr)];
 
-    #[cfg(feature = "create-account-allow-prefund")]
-    {
-        let funding_lamports = rent_min.saturating_sub(crank_ai.lamports());
+    let prefunded = crank_ai.lamports();
+    if prefunded == 0 {
+        // Fresh PDA (the common case): one `CreateAccount` CPI funds,
+        // allocates, and assigns in a single system-program invocation —
+        // a third of the CU of the split path below.
+        CreateAccount {
+            from: payer,
+            to: crank_ai,
+            lamports: rent_min,
+            space: total_size as u64,
+            owner: &hydra_api::ID,
+        }
+        .invoke_signed(&signers)?;
+    } else {
+        // Prefunded PDA: `CreateAccount` rejects accounts that already hold
+        // lamports, so top up the shortfall then allocate + assign.
+        let funding_lamports = rent_min.saturating_sub(prefunded);
         if funding_lamports == 0 && !payer.is_signer() {
             return Err(ProgramError::MissingRequiredSignature);
         }
-        CreateAccountAllowPrefund {
-            to: crank_ai,
-            space: total_size as u64,
-            owner: &hydra_api::ID,
-            funding: (funding_lamports > 0).then_some(Funding {
-                from: payer,
-                lamports: funding_lamports,
-            }),
-        }
-        .invoke_signed(&signers)?;
-    }
-
-    #[cfg(not(feature = "create-account-allow-prefund"))]
-    {
-        let prefunded = crank_ai.lamports();
-        if prefunded == 0 {
-            // Fresh PDA (the common case): one `CreateAccount` CPI funds,
-            // allocates, and assigns in a single system-program invocation —
-            // a third of the CU of the split path below.
-            CreateAccount {
+        if funding_lamports > 0 {
+            Transfer {
                 from: payer,
                 to: crank_ai,
-                lamports: rent_min,
-                space: total_size as u64,
-                owner: &hydra_api::ID,
+                lamports: funding_lamports,
             }
-            .invoke_signed(&signers)?;
-        } else {
-            // Prefunded PDA: `CreateAccount` rejects accounts that already hold
-            // lamports, so top up the shortfall then allocate + assign.
-            let funding_lamports = rent_min.saturating_sub(prefunded);
-            if funding_lamports == 0 && !payer.is_signer() {
-                return Err(ProgramError::MissingRequiredSignature);
-            }
-            if funding_lamports > 0 {
-                Transfer {
-                    from: payer,
-                    to: crank_ai,
-                    lamports: funding_lamports,
-                }
-                .invoke()?;
-            }
-            Allocate {
-                account: crank_ai,
-                space: total_size as u64,
-            }
-            .invoke_signed(&signers)?;
-            Assign {
-                account: crank_ai,
-                owner: &hydra_api::ID,
-            }
-            .invoke_signed(&signers)?;
+            .invoke()?;
         }
+        Allocate {
+            account: crank_ai,
+            space: total_size as u64,
+        }
+        .invoke_signed(&signers)?;
+        Assign {
+            account: crank_ai,
+            owner: &hydra_api::ID,
+        }
+        .invoke_signed(&signers)?;
     }
 
     // Validate each scheduled ix and re-serialize it into the tail in the
@@ -253,9 +229,7 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // lowers the data-length field — no syscall, never out of bounds — so the
     // unchecked variant is safe: `region_len <= upper_region`, the borrow above
     // is dropped, and the crank is program-owned after `CreateAccount`.
-    unsafe {
-        crank_ai.resize(CRANK_HEADER_SIZE + region_len);
-    }
+    crank_ai.resize(CRANK_HEADER_SIZE + region_len)?;
 
     // Suppress unused-import warnings when `logging` feature is off.
     let _ = _ix::CREATE;

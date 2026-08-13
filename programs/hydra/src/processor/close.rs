@@ -14,7 +14,7 @@ use hydra_api::{
 
 use crate::helpers::get_clock_slot;
 
-pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
+pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [reporter, crank_ai, recipient] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
