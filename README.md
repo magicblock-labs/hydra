@@ -8,8 +8,8 @@
 
 | Package     | Description                                  | Version | Docs                                    |
 | :---------- | :------------------------------------------- | :------ | :-------------------------------------- |
-| `hydra`     | Pinocchio `no_std` on-chain program          | `0.1.0` | [Overview](#overview)                   |
-| `hydra-api` | Shared Rust types, builders, and CPI helpers | `0.1.0` | [Integrating Hydra](#integrating-hydra) |
+| `hydra`     | Pinocchio `no_std` on-chain program          | `0.2.0` | [Overview](#overview)                   |
+| `hydra-api` | Shared Rust types, builders, and CPI helpers | `0.2.0` | [Integrating Hydra](#integrating-hydra) |
 
 ## Overview
 

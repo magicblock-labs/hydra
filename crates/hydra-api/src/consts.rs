@@ -48,6 +48,8 @@ pub mod ix {
 }
 
 pub mod base {
+    solana_address::declare_id!("Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea");
+
     /// Solana base transaction fee (lamports per signature) on the base layer.
     pub const BASE_FEE_LAMPORTS: u64 = 5_000;
     /// Flat per-trigger reward paid to the cranker. Equals `2 × base_fee`.
@@ -63,9 +65,14 @@ pub mod base {
 }
 
 pub mod ephemeral {
+    solana_address::declare_id!("eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf");
+
     /// Ephemeral cranks are free, use tips to incentivize the cranker.
     pub const BASE_FEE_LAMPORTS: u64 = 0;
-    /// Flat per-trigger reward paid to the cranker. Equals `2 × base_fee`.
+    /// Deliberately zero: with no base fee there is no flat reward to pay, so
+    /// the crank's `priority_tip` is the cranker's only incentive. Kept as a
+    /// named constant so the shared processor can stay generic over both
+    /// namespaces.
     pub const CRANKER_REWARD: u64 = 2 * BASE_FEE_LAMPORTS;
     /// Ephemeral-rollup slot time (milliseconds per slot).
     pub const SLOT_FREQUENCY_MS: u64 = 50;

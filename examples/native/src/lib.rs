@@ -8,7 +8,7 @@
 //!   0: payer            (writable, signer)
 //!   1: crank            (writable) — PDA at `[b"crank", payer, seed]` in hydra-api
 //!   2: system_program
-//!   3: hydra program    (implicit: pulled from hydra_api::ID inside the CPI)
+//!   3: hydra program    (implicit: pulled from hydra_api::base::ID inside the CPI)
 //!
 //! Instruction data (34 bytes):
 //!   [0..32]   seed
