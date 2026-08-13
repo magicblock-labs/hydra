@@ -349,8 +349,12 @@ mod client {
             }
         }
 
-        /// Build a `Close` instruction. `reporter` keeps the flat bounty (and the
-        /// vault rent refund); `recipient` receives the remaining balance.
+        /// Build a `Close` instruction. `recipient` receives the crank's
+        /// remaining balance; `reporter` receives the vault rent refund.
+        ///
+        /// Only unowned cranks (`authority == 0`) are permissionlessly
+        /// closable; for an owned crank, `reporter` and `recipient` must both
+        /// be its stored authority.
         pub fn close(reporter: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
             Instruction {
                 program_id: PROGRAM_ID,

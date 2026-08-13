@@ -66,12 +66,12 @@ fn log_error(_error: &ProgramError) {
         // `to_str` is an inherent method on `ProgramError` that internally
         // calls `HydraError::to_str` (defined in hydra-api::error) for
         // `ProgramError::Custom(n)` values.
-        let msg: &'static str = _error.to_str::<HydraError>();
+        let _msg: &'static str = _error.to_str::<HydraError>();
         #[cfg(target_os = "solana")]
         // SAFETY: sol_log_ takes (ptr, len) of a byte buffer the syscall
         // reads read-only for the duration of the call.
         unsafe {
-            solana_define_syscall::definitions::sol_log_(msg.as_ptr(), msg.len() as u64);
+            solana_define_syscall::definitions::sol_log_(_msg.as_ptr(), _msg.len() as u64);
         }
     }
 }
