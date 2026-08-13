@@ -17,6 +17,7 @@ SHELL := /bin/bash
 
 # Manifests for the crates that live outside the default workspace build.
 BASE_MANIFEST     := programs/hydra/Cargo.toml
+EPHEMERAL_MANIFEST := programs/hydra-ephemeral/Cargo.toml
 NOOP_MANIFEST      := tests/programs/noop/Cargo.toml
 NATIVE_MANIFEST    := examples/native/Cargo.toml
 PINOCCHIO_MANIFEST := examples/pinocchio/Cargo.toml
@@ -42,6 +43,7 @@ help: ## Show this help
 build: ## build-sbf the noop + hydra programs
 	cargo build-sbf --manifest-path $(NOOP_MANIFEST)
 	cargo build-sbf --manifest-path $(BASE_MANIFEST)
+	cargo build-sbf --manifest-path $(EPHEMERAL_MANIFEST)
 
 build-examples: ## build-sbf the native + pinocchio example programs
 	cargo build-sbf --manifest-path $(NATIVE_MANIFEST)
@@ -56,7 +58,7 @@ build-anchor: ## anchor build the anchor example (needs the anchor CLI)
 # ---------------------------------------------------------------------------
 # Format & lint (mirrors the fmt + default CI jobs).
 # ---------------------------------------------------------------------------
-.PHONY: fmt fmt-check lint
+.PHONY: fmt fmt-check lint lint-ephemeral
 
 fmt: ## Format the workspace and the excluded anchor example
 	cargo fmt --all

@@ -3,6 +3,7 @@ resolver = "2"
 default-members = ["programs/hydra"]
 members = [
     "programs/hydra",
+    "programs/hydra-ephemeral",
     "crates/hydra-api",
     "crates/hydra-cranker",
     "tests",
