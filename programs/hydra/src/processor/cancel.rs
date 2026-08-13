@@ -4,7 +4,7 @@ use pinocchio::{error::ProgramError, AccountView, ProgramResult};
 
 use hydra_api::{state::load_crank, HydraError};
 
-pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
+pub fn process(accounts: &[AccountView], _data: &[u8]) -> ProgramResult {
     let [authority, crank_ai, recipient] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -38,7 +38,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
 /// and reassigns ownership to the system program at the instruction boundary
 /// because `src.lamports == 0` post-write.
 #[inline(always)]
-pub(super) fn drain_lamports(src: &mut AccountView, dst: &mut AccountView) -> ProgramResult {
+pub(super) fn drain_lamports(src: &AccountView, dst: &AccountView) -> ProgramResult {
     let amount = src.lamports();
     let new_dst = dst
         .lamports()
