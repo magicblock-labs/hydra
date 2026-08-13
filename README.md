@@ -253,6 +253,19 @@ hydra-cranker \
   --rpc-url https://your.rpc.example \
   --ws-url wss://your.rpc.example
 
+# Against a MagicBlock ephemeral rollup. `--ephemeral` switches the target
+# program, the `Close` account layout, and the (zero-lamport) funding model at
+# runtime — the same binary drives either program, no rebuild needed.
+# `--rpc-url` points at the rollup; `--base-rpc-url` is required alongside it,
+# because the cranker delegates its own keypair at startup so the rollup will
+# let its balance change as the trigger fee payer, and delegating is a
+# base-layer transaction.
+hydra-cranker \
+  --keypair ~/.config/solana/cranker.json \
+  --rpc-url https://your.rollup.example \
+  --base-rpc-url https://your.rpc.example \
+  --ephemeral
+
 # With Prometheus metrics at http://0.0.0.0:9100/metrics
 # and JSON health at http://0.0.0.0:9100/healthz
 hydra-cranker \
