@@ -24,6 +24,9 @@ ANCHOR_MANIFEST    := examples/anchor/Cargo.toml
 
 CLIPPY := --all-targets -- -D warnings
 
+RUSTFLAGS ?= -D warnings
+export RUSTFLAGS
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
