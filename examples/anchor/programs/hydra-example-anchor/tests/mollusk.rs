@@ -20,7 +20,9 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-use hydra_example_anchor::{accounts as schedule_accts, instruction as schedule_ix, ID as EXAMPLE_ID};
+use hydra_example_anchor::{
+    accounts as schedule_accts, instruction as schedule_ix, ID as EXAMPLE_ID,
+};
 
 /// Path to the Anchor example `.so` (without extension), relative to this
 /// crate's `CARGO_MANIFEST_DIR`.
@@ -39,21 +41,28 @@ fn hydra_id() -> Pubkey {
     Pubkey::new_from_array(hydra_api::ID.to_bytes())
 }
 
+fn require_so(path: &str, how_to_build: &str) -> bool {
+    if std::path::Path::new(&format!("{path}.so")).exists() {
+        return true;
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{path}.so not found. {how_to_build}"
+    );
+    eprintln!("skipping: {path}.so not found. {how_to_build}");
+    false
+}
+
 #[test]
 fn schedule_creates_crank_via_cpi_into_hydra() {
-    // Skip gracefully if prerequisites aren't built yet.
-    if !std::path::Path::new(&format!("{HYDRA_SO}.so")).exists() {
-        eprintln!(
-            "skipping: {HYDRA_SO}.so not found. \
-             Run `cargo build-sbf` on the root Hydra workspace first."
-        );
+    // Skip gracefully if prerequisites aren't built yet (locally only).
+    if !require_so(
+        HYDRA_SO,
+        "Run `cargo build-sbf` on the root Hydra workspace first.",
+    ) {
         return;
     }
-    if !std::path::Path::new(&format!("{EXAMPLE_SO}.so")).exists() {
-        eprintln!(
-            "skipping: {EXAMPLE_SO}.so not found. \
-             Run `anchor build` in examples/anchor first."
-        );
+    if !require_so(EXAMPLE_SO, "Run `anchor build` in examples/anchor first.") {
         return;
     }
 
@@ -96,8 +105,7 @@ fn schedule_creates_crank_via_cpi_into_hydra() {
     };
 
     let hydra_elf = std::fs::read(format!("{HYDRA_SO}.so")).expect("read hydra .so");
-    let hydra_program_acct =
-        mollusk_svm::program::create_program_account_loader_v2(&hydra_elf);
+    let hydra_program_acct = mollusk_svm::program::create_program_account_loader_v2(&hydra_elf);
 
     let accounts = vec![
         (payer, Account::new(1_000_000_000, 0, &system_program)),
