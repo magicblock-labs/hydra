@@ -41,7 +41,7 @@ jobs:
         run: make fmt-check
 
   # ---------------------------------------------------------------------------
-  # Default feature set: lint + tests with the `ephemeral` feature OFF.
+  # Default feature set: lint + the full test suite (workspace + examples).
   # ---------------------------------------------------------------------------
   default:
     name: lint + test (default)
@@ -59,7 +59,8 @@ jobs:
 
       - name: Install Solana toolchain (build-sbf)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          curl -sSfL -o "$RUNNER_TEMP/solana-install" "https://release.anza.xyz/${SOLANA_VERSION}/install"
+          sh "$RUNNER_TEMP/solana-install"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       # Keep the version in sync with `[toolchain] anchor_version` in
