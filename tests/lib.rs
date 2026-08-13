@@ -26,6 +26,12 @@ use hydra_api::{
 /// Absolute path to the built `.so` (without extension) — mollusk appends `.so`.
 pub const HYDRA_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/hydra");
 
+/// Absolute path to the built ephemeral `.so` (without extension).
+pub const HYDRA_EPHEMERAL_SO: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../target/deploy/hydra_ephemeral"
+);
+
 // ---------------------------------------------------------------------------
 // Helpers (pub so the bench file `benches/compute_units.rs` can reuse them)
 // ---------------------------------------------------------------------------
@@ -46,6 +52,16 @@ pub fn hydra_id() -> Pubkey {
 pub fn mollusk_with_hydra() -> Mollusk {
     let id = hydra_id();
     let mut mollusk = Mollusk::new(&id, HYDRA_SO);
+    memo::add_program(&mut mollusk);
+    mollusk
+}
+
+pub fn eph_id() -> Pubkey {
+    Pubkey::new_from_array(hydra_api::ephemeral::ID.to_bytes())
+}
+
+pub fn mollusk_with_hydra_ephemeral() -> Mollusk {
+    let mut mollusk = Mollusk::new(&eph_id(), HYDRA_EPHEMERAL_SO);
     memo::add_program(&mut mollusk);
     mollusk
 }
@@ -89,7 +105,7 @@ pub fn create_ix(
         priority_tip,
         cu_limit,
         &[ScheduledIx {
-            program_id: sched_program,
+            program_id: sched_program.to_bytes(),
             metas: sched_metas,
             data: sched_data,
         }],
@@ -127,7 +143,7 @@ pub fn create_ix_multi(
     for s in sched {
         data.push(s.metas.len() as u8);
         data.extend_from_slice(&(s.data.len() as u16).to_le_bytes());
-        data.extend_from_slice(&s.program_id.to_bytes());
+        data.extend_from_slice(&s.program_id);
         for meta in s.metas {
             let flag: u8 = if meta.is_writable {
                 META_FLAG_WRITABLE
@@ -135,7 +151,7 @@ pub fn create_ix_multi(
                 0
             };
             data.push(flag);
-            data.extend_from_slice(&meta.pubkey.to_bytes());
+            data.extend_from_slice(&meta.pubkey);
         }
         data.extend_from_slice(s.data);
     }
@@ -317,7 +333,7 @@ pub fn print_cu_table() {
     let payer_m = Pubkey::new_unique();
     let multi_specs: Vec<ScheduledIx> = (0..MULTI_N)
         .map(|_| ScheduledIx {
-            program_id: NOOP_ID,
+            program_id: NOOP_ID.to_bytes(),
             metas: &[],
             data: tick,
         })
@@ -478,11 +494,13 @@ pub fn print_cu_table() {
 
 #[cfg(test)]
 mod tests {
+    use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
     use hydra_api::{
-        consts::base::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
+        consts::{base, ephemeral},
         instruction::CreateArgs,
         state::region_len_for,
     };
+    use mollusk_svm::result::types::TransactionProgramResult;
 
     use super::*;
 
@@ -504,7 +522,7 @@ mod tests {
         let scheduled_data: &[u8] = b"tick";
         let cu_limit: u32 = 321_000;
 
-        let ix = hydra_api::instruction::create(
+        let ix = hydra_api::instruction::base::create(
             payer,
             crank_pda,
             &CreateArgs {
@@ -516,8 +534,8 @@ mod tests {
                 priority_tip: 1_000,
                 cu_limit,
                 scheduled: &[ScheduledIx {
-                    program_id: memo::ID,
-                    metas: &[SchedMeta::writable(scheduled_meta)],
+                    program_id: memo::ID.to_bytes(),
+                    metas: &[SchedMeta::writable(scheduled_meta.to_bytes())],
                     data: scheduled_data,
                 }],
             },
@@ -574,7 +592,7 @@ mod tests {
             1_000,     // priority_tip
             0,         // cu_limit (0 = omit the ix)
             memo::ID,
-            &[SchedMeta::readonly(recipient)], // one read-only account just for content
+            &[SchedMeta::readonly(recipient.to_bytes())], // one read-only account just for content
             memo_data,
         );
 
@@ -770,7 +788,7 @@ mod tests {
 
         assert_eq!(
             cranker_acct.lamports,
-            cranker_starting + CRANKER_REWARD + priority_tip,
+            cranker_starting + base::CRANKER_REWARD + priority_tip,
             "cranker reward"
         );
 
@@ -778,6 +796,205 @@ mod tests {
         assert_eq!(header.executed(), 1, "executed++");
         assert_eq!(header.remaining(), 9, "remaining--");
         assert_eq!(header.next_exec_slot(), 100, "slot advanced by interval");
+    }
+
+    /// The ephemeral `Trigger` must pay the cranker exactly like the base one.
+    /// Ephemeral `Create` CPIs the Magic program (unavailable in mollusk), so we
+    /// mint a valid crank via the base program — the `Crank` layout + region are
+    /// identical — then re-own it to the ephemeral program and trigger it.
+    #[test]
+    fn ephemeral_trigger_pays_cranker() {
+        let base = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let memo_data: &[u8] = b"tick";
+        let priority_tip: u64 = 2_500;
+
+        let create = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            priority_tip,
+            0,
+            memo::ID,
+            &[],
+            memo_data,
+        );
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let (memo_id, memo_acct) = memo::keyed_account();
+        let create_accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (memo_id, memo_acct.clone()),
+            (system_program, system_program_acct.clone()),
+        ];
+        let after_create = base.process_transaction_instructions(&[create], &create_accounts);
+        assert!(
+            after_create.raw_result.is_ok(),
+            "base create failed: {:?}",
+            after_create.raw_result
+        );
+
+        // Re-own the freshly-minted crank to the ephemeral program and fund it
+        // as the cranker-reward budget (a sponsor would do this with a transfer).
+        let mut crank_acct = after_create
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a.clone())
+            .expect("crank after create");
+        crank_acct.owner = eph_id();
+        crank_acct.lamports += 1_000_000;
+
+        let eph = mollusk_with_hydra_ephemeral();
+        let cranker_starting: u64 = 0;
+        let trigger = hydra_api::instruction::ephemeral::trigger(crank_pda, cranker);
+        let scheduled = Instruction {
+            program_id: memo::ID,
+            accounts: vec![],
+            data: memo_data.to_vec(),
+        };
+        let trigger_accounts = vec![
+            (crank_pda, crank_acct),
+            (cranker, Account::new(cranker_starting, 0, &system_program)),
+            (memo_id, memo_acct),
+            (system_program, system_program_acct),
+        ];
+
+        let after = eph.process_transaction_instructions(&[trigger, scheduled], &trigger_accounts);
+        assert!(
+            after.raw_result.is_ok(),
+            "ephemeral trigger failed: {:?}",
+            after.raw_result
+        );
+
+        let cranker_acct = after
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &cranker)
+            .map(|(_, a)| a)
+            .expect("cranker after trigger");
+        assert_eq!(
+            cranker_acct.lamports,
+            cranker_starting + ephemeral::CRANKER_REWARD + priority_tip,
+            "ephemeral cranker reward"
+        );
+
+        let crank_after = after
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank after trigger");
+        let header = decode_header(&crank_after.data);
+        assert_eq!(header.executed(), 1, "executed++");
+        assert_eq!(header.remaining(), 9, "remaining--");
+        assert_eq!(header.next_exec_slot(), 100, "slot advanced by interval");
+    }
+
+    #[test]
+    fn ephemeral_close_gates_owned_cranks_to_their_authority() {
+        const UNAUTHORIZED_AUTHORITY: u64 = 4;
+        const NOT_CLOSABLE: u64 = 5;
+
+        // A crank minted by the base program, re-owned to the ephemeral one —
+        // same trick as `ephemeral_trigger_pays_cranker`, since ephemeral
+        // `Create` needs the Magic program that mollusk doesn't have.
+        let mint_eph_crank = |authority: [u8; 32]| -> Account {
+            let base = mollusk_with_hydra();
+            let payer = Pubkey::new_unique();
+            let (crank_pda, _bump) = find_crank(&SEED);
+            let create = create_ix(
+                payer,
+                crank_pda,
+                SEED,
+                authority,
+                0,   // start_slot
+                100, // interval_slots
+                10,  // remaining — not exhausted
+                0,   // priority_tip — keeps `underfunded` false at the base rent floor
+                0,   // cu_limit
+                memo::ID,
+                &[],
+                b"tick",
+            );
+            let (system_program, system_program_acct) = keyed_account_for_system_program();
+            let (memo_id, memo_acct) = memo::keyed_account();
+            let accounts = vec![
+                (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+                (crank_pda, Account::default()),
+                (memo_id, memo_acct),
+                (system_program, system_program_acct),
+            ];
+            let after = base.process_transaction_instructions(&[create], &accounts);
+            assert!(
+                after.raw_result.is_ok(),
+                "base create failed: {:?}",
+                after.raw_result
+            );
+            let mut crank_acct = after
+                .resulting_accounts
+                .into_iter()
+                .find(|(k, _)| k == &crank_pda)
+                .map(|(_, a)| a)
+                .expect("crank after create");
+            crank_acct.owner = eph_id();
+            crank_acct
+        };
+
+        let eph = mollusk_with_hydra_ephemeral();
+        let (crank_pda, _bump) = find_crank(&SEED);
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let vault = Pubkey::new_from_array(EPHEMERAL_VAULT_ID.to_bytes());
+        let magic = Pubkey::new_from_array(MAGIC_PROGRAM_ID.to_bytes());
+
+        let run = |crank_acct: Account, reporter: Pubkey, recipient: Pubkey| {
+            let close = hydra_api::instruction::ephemeral::close(reporter, crank_pda, recipient);
+            let accounts = vec![
+                (reporter, Account::new(0, 0, &system_program)),
+                (crank_pda, crank_acct),
+                (recipient, Account::new(0, 0, &system_program)),
+                (vault, Account::default()),
+                (magic, Account::default()),
+                (system_program, system_program_acct.clone()),
+            ];
+            match eph
+                .process_transaction_instructions(&[close], &accounts)
+                .program_result
+            {
+                TransactionProgramResult::Failure(_, err) => u64::from(err),
+                other => panic!("expected a program failure, got {other:?}"),
+            }
+        };
+
+        // 1. Owned crank, wrong reporter -> stopped by the gate.
+        let authority = Pubkey::new_unique();
+        let imposter = Pubkey::new_unique();
+        let code = run(mint_eph_crank(authority.to_bytes()), imposter, authority);
+        assert_eq!(
+            code, UNAUTHORIZED_AUTHORITY,
+            "imposter must be stopped by the authority gate"
+        );
+
+        // 2. Owned crank, the authority itself -> past the gate.
+        let code = run(mint_eph_crank(authority.to_bytes()), authority, authority);
+        assert_eq!(
+            code, NOT_CLOSABLE,
+            "the authority should clear the gate and be stopped by the closable check"
+        );
+
+        // 3. Unowned crank, arbitrary reporter -> past the gate, still permissionless.
+        let recipient = Pubkey::new_unique();
+        let code = run(mint_eph_crank([0u8; 32]), imposter, recipient);
+        assert_eq!(
+            code, NOT_CLOSABLE,
+            "unowned cranks must stay permissionlessly closable"
+        );
     }
 
     #[test]
@@ -1115,7 +1332,7 @@ mod tests {
     #[test]
     fn close_permissionless_when_stuck() {
         let mut mollusk = mollusk_with_hydra();
-        mollusk.sysvars.clock.slot = STALENESS_THRESHOLD_SLOTS + 1;
+        mollusk.sysvars.clock.slot = base::STALENESS_THRESHOLD_SLOTS + 1;
 
         let payer = Pubkey::new_unique();
         let reporter = Pubkey::new_unique();
@@ -1565,12 +1782,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
-                    metas: &[SchedMeta::writable(acct_a)],
+                    program_id: memo::ID.to_bytes(),
+                    metas: &[SchedMeta::writable(acct_a.to_bytes())],
                     data: b"first",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"second",
                 },
@@ -1633,12 +1850,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1697,7 +1914,7 @@ mod tests {
         // One Trigger = one reward + one schedule advance, regardless of ix count.
         assert_eq!(
             cranker_acct.lamports,
-            cranker_starting + CRANKER_REWARD + priority_tip,
+            cranker_starting + base::CRANKER_REWARD + priority_tip,
             "single reward per trigger"
         );
         let header = decode_header(&crank_acct.data);
@@ -1725,12 +1942,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1786,12 +2003,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1841,12 +2058,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"alpha",
                 },
                 ScheduledIx {
-                    program_id: memo::ID,
+                    program_id: memo::ID.to_bytes(),
                     metas: &[],
                     data: b"beta",
                 },
@@ -1977,7 +2194,7 @@ mod tests {
         // Exactly MAX_INSTRUCTIONS tiny memos -> ok.
         let at_max: Vec<ScheduledIx> = (0..MAX_INSTRUCTIONS)
             .map(|_| ScheduledIx {
-                program_id: memo::ID,
+                program_id: memo::ID.to_bytes(),
                 metas: &[],
                 data: b"m",
             })
@@ -2003,7 +2220,7 @@ mod tests {
         // One past the cap -> rejected.
         let over: Vec<ScheduledIx> = (0..MAX_INSTRUCTIONS + 1)
             .map(|_| ScheduledIx {
-                program_id: memo::ID,
+                program_id: memo::ID.to_bytes(),
                 metas: &[],
                 data: b"m",
             })
@@ -2056,12 +2273,12 @@ mod tests {
             0,
             &[
                 ScheduledIx {
-                    program_id: NOOP_ID,
-                    metas: &[SchedMeta::writable(writable_acct)],
+                    program_id: NOOP_ID.to_bytes(),
+                    metas: &[SchedMeta::writable(writable_acct.to_bytes())],
                     data: b"one",
                 },
                 ScheduledIx {
-                    program_id: NOOP_ID,
+                    program_id: NOOP_ID.to_bytes(),
                     metas: &[],
                     data: b"two",
                 },

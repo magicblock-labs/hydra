@@ -81,33 +81,54 @@ payload size (it is a one-time cost dominated by the account-creation syscall).
 Reproduce:
 
 ```sh
-cargo build-sbf --manifest-path programs/hydra/Cargo.toml
-cargo build-sbf --manifest-path tests/programs/noop/Cargo.toml
-cargo test -p hydra-tests cu_table -- --ignored --nocapture
+make cu-table
 ```
 
 ## Build
 
+Run `make help` to list the available targets. Common commands:
+
+- `make build` — build the base and ephemeral on-chain programs.
+- `make fmt` / `make fmt-check` — format Rust sources or check formatting.
+- `make lint` — run clippy for the workspace, plus the Anchor example check.
+- `make test` — run the main `hydra-tests` suite.
+- `make test-examples` — run the native and Pinocchio example tests.
+- `make cu-table` — reproduce the compute-unit table.
+- `make ci` — run the default CI checks locally.
+- `make install-tools` — install `cargo-nextest`.
+- `make clean` — remove Cargo build artifacts.
+
 ```sh
-# Build the on-chain program.
-cargo build-sbf --manifest-path programs/hydra/Cargo.toml
+# Show available build, lint, and test targets.
+make help
+
+# Build the on-chain programs.
+make build
 
 # Build the cranker.
 cargo build -p hydra-cranker
 
-# Run the test suite.
-cargo test -p hydra-tests
+# Run the main test suite.
+make test
+
+# Run the default CI checks locally.
+make ci
 ```
 
 ## Integrating Hydra
 
 Use `hydra-api` from clients or from your own on-chain program.
 
-| Use case                      | Feature         | API                            |
-| ----------------------------- | --------------- | ------------------------------ |
-| Host-side client              | `client`        | `Instruction` builders         |
-| `solana-program` / Anchor CPI | `cpi-native`    | `hydra_api::cpi::native::*`    |
-| Pinocchio CPI                 | `cpi-pinocchio` | `hydra_api::cpi::pinocchio::*` |
+| Use case                      | Feature         | API                                  |
+| ----------------------------- | --------------- | ------------------------------------ |
+| Host-side client              | `client`        | `Instruction` builders               |
+| `solana-program` / Anchor CPI | `cpi-native`    | `hydra_api::cpi::base::native::*`    |
+| Pinocchio CPI                 | `cpi-pinocchio` | `hydra_api::cpi::base::pinocchio::*` |
+
+Both the builders and the CPI helpers are split by target ledger: `base::*`
+drives the base-layer program, and `ephemeral::*` (behind the extra `ephemeral`
+feature) drives the [ephemeral-rollup
+program](#ephemeral-rollup-crank-hydra-ephemeral-program).
 
 `Trigger` is not exposed as a CPI helper. It must be sent as a top-level
 instruction.
@@ -121,7 +142,7 @@ Examples:
 ## Creating a Crank
 
 ```rust
-use hydra_api::instruction::{self as ix, CreateArgs, ScheduledIx};
+use hydra_api::instruction::{base as ix, CreateArgs, ScheduledIx};
 
 let seed = [0x42u8; 32];
 let (crank, _bump) = ix::find_crank_pda(&seed);
@@ -258,21 +279,21 @@ parked after repeated failures. It returns `503` before the first slot, when the
 last slot sweep is older than 30 seconds, when eligible cranks are parked, or
 when triggerable cranks were not attempted on the latest sweep.
 
-| Metric | Type | Labels | Meaning |
-|---|---|---|---|
-| `cranks_cached` | gauge | — | Cranks currently in the in-memory cache. |
-| `current_slot` | gauge | — | Last slot observed from `slotSubscribe`. |
-| `eligible_now` | gauge | — | Cranks eligible to trigger on the last slot tick. |
-| `triggerable_now` | gauge | — | Eligible cranks after local cooldown/backoff filtering. |
-| `parked_now` | gauge | — | Eligible cranks parked after repeated failures at the same `next_exec_slot`. |
-| `max_overdue_slots` | gauge | — | Largest `current_slot - next_exec_slot` among currently eligible cranks. |
-| `triggers_submitted_total` | counter | `result={ok,err}` | Triggers submitted. |
-| `closes_submitted_total` | counter | `result={ok,err}` | Permissionless `Close` transactions submitted. |
-| `ws_reconnects_total` | counter | `source={program,slot}` | WS (re)connect attempts. |
-| `grpc_reconnects_total` | counter | `source={program,slot}` | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set). |
-| `cache_events_total` | counter | `kind={insert,update,remove}` | Cache mutations driven by `programSubscribe`. |
-| `sweep_duration_seconds` | histogram | — | Wall time per slot-tick sweep (scan + fire). Buckets target sub-10 ms. |
-| `rpc_errors_total` | counter | `op={get_program_accounts,get_latest_blockhash,send_transaction}` | RPC call errors, by failing operation. |
+| Metric                     | Type      | Labels                                                            | Meaning                                                                      |
+| -------------------------- | --------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `cranks_cached`            | gauge     | —                                                                 | Cranks currently in the in-memory cache.                                     |
+| `current_slot`             | gauge     | —                                                                 | Last slot observed from `slotSubscribe`.                                     |
+| `eligible_now`             | gauge     | —                                                                 | Cranks eligible to trigger on the last slot tick.                            |
+| `triggerable_now`          | gauge     | —                                                                 | Eligible cranks after local cooldown/backoff filtering.                      |
+| `parked_now`               | gauge     | —                                                                 | Eligible cranks parked after repeated failures at the same `next_exec_slot`. |
+| `max_overdue_slots`        | gauge     | —                                                                 | Largest `current_slot - next_exec_slot` among currently eligible cranks.     |
+| `triggers_submitted_total` | counter   | `result={ok,err}`                                                 | Triggers submitted.                                                          |
+| `closes_submitted_total`   | counter   | `result={ok,err}`                                                 | Permissionless `Close` transactions submitted.                               |
+| `ws_reconnects_total`      | counter   | `source={program,slot}`                                           | WS (re)connect attempts.                                                     |
+| `grpc_reconnects_total`    | counter   | `source={program,slot}`                                           | Yellowstone gRPC (re)connect attempts (only when `--grpc-url` is set).       |
+| `cache_events_total`       | counter   | `kind={insert,update,remove}`                                     | Cache mutations driven by `programSubscribe`.                                |
+| `sweep_duration_seconds`   | histogram | —                                                                 | Wall time per slot-tick sweep (scan + fire). Buckets target sub-10 ms.       |
+| `rpc_errors_total`         | counter   | `op={get_program_accounts,get_latest_blockhash,send_transaction}` | RPC call errors, by failing operation.                                       |
 
 Useful alerts:
 
@@ -285,6 +306,20 @@ Useful alerts:
 - `rate(hydra_cranker_rpc_errors_total[5m]) > 0.1` — RPC endpoint failing a notable fraction of calls.
 
 ## Instruction Reference
+
+Hydra ships as **two on-chain programs** that share the same discriminators
+(`0–3`) and on-chain `Crank` layout, distinguished by program ID:
+
+- `hydra` (`Hydra17…`) — the base-layer crank, in `programs/hydra`.
+- `hydra-ephemeral` (`eHyd5…`) — the
+  [ephemeral-rollup crank](#ephemeral-rollup-crank-hydra-ephemeral-program), in
+  `programs/hydra-ephemeral`.
+
+The instruction-parsing, tail-serialization and follow-up-verification logic is
+shared between them via [`hydra_api::program`] (behind the api crate's `program`
+feature); each program only carries its own account-funding model.
+
+The base-layer (`hydra`) instructions:
 
 | Disc | Name      | Accounts                                      | Data             |
 | ---: | --------- | --------------------------------------------- | ---------------- |
@@ -304,10 +339,90 @@ the crank PDA — no dedicated instruction exists.
 - `MAX_DATA_LEN = 1024`
 - reward is fixed at `10_000` lamports plus the stored priority tip
 
+## Ephemeral Rollup Crank (`hydra-ephemeral` program)
+
+The separate `hydra-ephemeral` program (ID `eHyd5…`, crate
+`programs/hydra-ephemeral`) runs a crank on a
+[MagicBlock](https://magicblock.gg) **ephemeral rollup (ER)**, where the crank
+lives as a MagicBlock **ephemeral account** instead of a base-layer PDA. The
+base-layer `hydra` program neither contains this code nor depends on
+`ephemeral-rollups-pinocchio`; the two programs share their schedule/verify
+logic through [`hydra_api::program`].
+
+The economic model follows the same shape as the base crank — the cranker is
+paid `CRANKER_REWARD + priority_tip` out of the crank's lamport balance on
+`Trigger`, and `Cancel`/`Close` pay out the leftover balance — with three
+differences the ER forces:
+
+- **The tip is the whole reward.** ER transactions carry no base fee, so
+  `consts::ephemeral::CRANKER_REWARD` is `0` (against `10_000` on base) and the
+  crank's `priority_tip` is the cranker's *only* incentive. A crank created with
+  `priority_tip: 0` pays its cranker nothing, and the flat `Close` bounty is
+  likewise `0` — a reporter tearing down an unowned crank is paid by the vault
+  rent refund, not by the crank balance.
+- **Vault rent is separate from the crank balance.** The ephemeral account's rent
+  (a flat per-byte fee) is paid by a sponsor into a shared vault, not held in the
+  account, so the crank's stored `rent_min` is `0`. The crank still holds a plain
+  lamport balance (funded by the sponsor) that funds the cranker rewards, exactly
+  like base; the only `Trigger` floor is being able to afford the reward.
+- **Creation/teardown go through the Magic program.** The Magic program
+  materializes the ephemeral account synchronously, so `Create` allocates the
+  crank (via a Magic CPI signed by the crank PDA) and writes its header +
+  scheduled-ix tail in one instruction. `Cancel`/`Close` first drain the crank's
+  leftover lamports to a `recipient` (the same bounty/refund split as base), then
+  CPI Magic `close` to deallocate the account and refund the vault rent to the
+  teardown's signer.
+
+Lifecycle: `Create` → `Trigger` (+ scheduled siblings, run top-level on the ER) →
+`Cancel` (authority-gated) / `Close` (exhausted, underfunded, or stuck). On
+teardown the leftover balance refunds to `recipient` and the vault rent refunds
+to whoever signs the teardown. Because the Magic program refunds the vault rent
+to the teardown's signer, `Close` is only *permissionless for unowned cranks*
+(`authority == 0`): when a non-zero `authority` is set, only that authority may
+`Close` the crank (and only that authority may be the `recipient`), so the whole
+teardown — leftover balance and vault rent — stays with the owner rather than an
+arbitrary reporter. Unowned cranks stay permissionlessly closable by
+anyone. The crank PDA derivation (`[b"crank", seed]`) and the on-chain `Crank`
+layout are unchanged, so the template / verification model is identical.
+
+### Instruction Reference (ephemeral)
+
+Same discriminators as the base program (`0–3`); the account shapes differ
+because creation/close go through the Magic program rather than the System
+program.
+
+| Disc | Name      | Accounts                                                          | Data             |
+| ---: | --------- | ----------------------------------------------------------------- | ---------------- |
+|    0 | `Create`  | `sponsor(w,s), crank(w), vault(w), magic_program`                 | schedule payload |
+|    1 | `Trigger` | `crank(w), cranker(w,s), instructions_sysvar`                     | none             |
+|    2 | `Cancel`  | `authority(w,s), crank(w), recipient(w), vault(w), magic_program` | none             |
+|    3 | `Close`   | `reporter(w,s), crank(w), recipient(w), vault(w), magic_program`  | none             |
+
+`vault` is the ephemeral rent vault and `magic_program` is MagicBlock's Magic
+program; `hydra-api` re-exports both under its `ephemeral` feature as
+`consts::magic::EPHEMERAL_VAULT_ID` / `MAGIC_PROGRAM_ID`, and the
+`client`-feature builder fills them in. `sponsor` must
+be an account delegated to the ER (it pays the rent and sets `authority_signer`).
+
+Build an ephemeral `Create` with the same `CreateArgs` as base `create`:
+
+```rust
+use hydra_api::instruction::{ephemeral as ix, CreateArgs, ScheduledIx};
+
+let (crank, _bump) = ix::find_crank_pda(&seed);
+let create = ix::create(
+    sponsor_pubkey,
+    crank,
+    &CreateArgs { seed, authority, start_slot: 0, interval_slots: 50,
+                  remaining: 0, priority_tip: 0, cu_limit: 0, scheduled },
+);
+```
+
 ## Releasing
 
-`hydra-api` is the only crate published to crates.io (`hydra` is a program,
-not a library; `hydra-cranker` / the examples are workspace-local).
+`hydra-api` is the only crate published to crates.io (`hydra` and
+`hydra-ephemeral` are programs, not libraries; `hydra-cranker` / the examples
+are workspace-local).
 
 Release flow:
 

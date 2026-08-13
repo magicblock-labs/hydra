@@ -62,7 +62,7 @@ pub fn fire_trigger(
 ) -> Result<()> {
     let scheduled = ix::scheduled_ixs_from_crank(&entry.data)
         .ok_or_else(|| anyhow!("malformed crank tail for {}", entry.pubkey))?;
-    let trigger = ix::trigger(entry.pubkey, cranker.pubkey());
+    let trigger = ix::base::trigger(entry.pubkey, cranker.pubkey());
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {
         metrics::metrics()
             .rpc_errors_total
@@ -168,7 +168,7 @@ pub fn fire_close(
     } else {
         Pubkey::new_from_array(entry.authority)
     };
-    let close = ix::close(cranker.pubkey(), entry.pubkey, recipient);
+    let close = ix::base::close(cranker.pubkey(), entry.pubkey, recipient);
     let blockhash = rpc.get_latest_blockhash().map_err(|e| {
         metrics::metrics()
             .rpc_errors_total
