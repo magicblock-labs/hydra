@@ -34,6 +34,15 @@ const POST_SUBMIT_COOLDOWN_SLOTS: u64 = 1;
 /// purges the crank from the cache, so this map only tracks race losers.
 const CLOSE_RETRY_COOLDOWN_SLOTS: u64 = 10;
 
+/// How long an optimistically advanced `next_exec_slot` (see
+/// `cache::advance_after_trigger`) may go unconfirmed before it is undone. An
+/// accepted submit is not a landed transaction, and a dropped one produces no
+/// account change and therefore no `programSubscribe` echo to correct the
+/// cache — so without a bound the crank sits out a full interval on a fire that
+/// never happened. ~12 s of base-layer chain time, ~1.5 s on a rollup, both far
+/// above `processed`-commitment echo latency.
+const OPTIMISTIC_REARM_SLOTS: u64 = 30;
+
 struct FailureState {
     count: u32,
     at_slot: u64,
@@ -330,6 +339,17 @@ fn main() -> Result<()> {
         // Time the full sweep (scan + fire). `observe_duration` on drop.
         let _sweep = metrics::metrics().sweep_duration_seconds.start_timer();
 
+        // Before scanning: put back any crank whose submit was accepted but
+        // whose advance the chain never confirmed.
+        for pk in cache::rearm_unconfirmed(&cache, slot, OPTIMISTIC_REARM_SLOTS) {
+            log::warn!(
+                "slot {}: re-arming {} — no on-chain update confirmed its trigger within {} slots",
+                slot,
+                pk,
+                OPTIMISTIC_REARM_SLOTS
+            );
+        }
+
         // Close takes precedence: its staleness arm can overlap
         // `is_eligible`, and a stuck crank should be cleaned up rather than
         // re-fired.
@@ -417,7 +437,7 @@ fn main() -> Result<()> {
                     // Replay `Trigger`'s schedule advance in our cache now, so
                     // the crank's next fire follows its `interval_slots` instead
                     // of stalling until the `programSubscribe` echo catches up.
-                    cache::advance_after_trigger(&cache, entry.pubkey, entry.next_exec_slot);
+                    cache::advance_after_trigger(&cache, entry.pubkey, entry.next_exec_slot, slot);
                     // Failure record clears only when the cache observes an
                     // advanced `next_exec_slot`; submit-Ok alone isn't proof
                     // the tx landed.
