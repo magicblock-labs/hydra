@@ -21,7 +21,7 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Formatting — covers all root workspace members.
+  # Formatting — the root workspace plus the excluded anchor / e2e crates.
   # ---------------------------------------------------------------------------
   fmt:
     name: rustfmt
@@ -41,10 +41,10 @@ jobs:
         run: make fmt-check
 
   # ---------------------------------------------------------------------------
-  # Default feature set: lint + the full test suite (workspace + examples).
+  # Default feature set: lint + the full test suite (workspace, examples, anchor)
   # ---------------------------------------------------------------------------
   default:
-    name: lint + test (default)
+    name: lint + test (default, incl. live e2e)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +76,31 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
+      # `make ci` runs the live e2e suite, which needs both validator binaries.
+      # The version is pinned in the Makefile so a local run matches CI.
+      - name: Install MagicBlock validators (mb-test-validator + ephemeral-validator)
+        run: |
+          make install-validators
+          mb-test-validator --version
+          ephemeral-validator --version
+
+      # `tests/e2e` is its own workspace, so it needs its own cache entry.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tests/e2e
+
+      # The validators are file-descriptor and inotify hungry; `prlimit --pid $$`
+      # only affects this step's shell, so it must share it with `make ci`.
       - name: Default CI checks
-        run: make ci
+        run: |
+          sudo prlimit --pid $$ --nofile=1048576:1048576
+          sudo sysctl fs.inotify.max_user_instances=1280
+          sudo sysctl fs.inotify.max_user_watches=655360
+          make ci
