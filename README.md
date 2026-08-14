@@ -256,10 +256,14 @@ npm install -g @magicblock-labs/hydra-cranker-darwin-arm64   # macOS, Apple sili
 npm's `os`/`cpu` metadata pins each package to its platform, so listing them all
 as `optionalDependencies` also works — npm installs only the one that applies.
 
-Or build from source:
+Or build from source. `CARGO_PROFILE_RELEASE_LTO=false` turns off the thin LTO
+the workspace enables for the on-chain programs — on a host build it makes rustc
+embed LLVM bitcode that Apple's linker cannot parse, and the macOS link fails.
+Point `--tag` at the release you want, or drop it to build the tip of `main`:
 
 ```sh
-cargo install --git https://github.com/magicblock-labs/hydra hydra-cranker
+CARGO_PROFILE_RELEASE_LTO=false \
+  cargo install --git https://github.com/magicblock-labs/hydra --tag v0.2.0 hydra-cranker
 ```
 
 ### Usage
