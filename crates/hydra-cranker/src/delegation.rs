@@ -104,7 +104,9 @@ pub fn is_delegated(rpc: &RpcClient, account: &Pubkey) -> Result<bool> {
 /// then wait for the rollup to agree.
 ///
 /// Idempotent: a cranker restarting against a rollup it is already delegated to
-/// sends no transaction.
+/// sends no transaction. Returns whether *this* call delegated the account,
+/// which is what tells the shutdown path the delegation is ours to release —
+/// see [`undelegate`].
 ///
 /// **Paying for your own delegation.** The cranker is the sole signer and payer,
 /// which the delegation program does not support directly: `Delegate` requires

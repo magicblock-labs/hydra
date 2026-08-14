@@ -231,6 +231,12 @@ fn main() -> Result<()> {
     // only job is to be an *undelegated* instruction payer, which is what keeps
     // the magic program off its fee path. See `delegation::undelegate`.
     let undelegate_payer = Keypair::new();
+    // Whether *this process* took the delegation, which is what entitles it to
+    // release it on the way out. A pre-existing delegation belongs to whoever
+    // made it — an operator, a sponsor tool, or a second cranker on the same
+    // key — and tearing it down here would strand them on
+    // `InvalidAccountForFee`.
+    let mut delegated_by_us = false;
 
     if mode::is_ephemeral() {
         log::info!("undelegate payer = {}", undelegate_payer.pubkey());
@@ -239,7 +245,7 @@ fn main() -> Result<()> {
         })?;
         log::info!("base rpc = {}", url);
         let base = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
-        delegation::ensure_delegated(&base, &rpc, &cranker)?;
+        delegated_by_us = delegation::ensure_delegated(&base, &rpc, &cranker)?;
         // Landing on the base layer is not the same as the rollup having seen
         // it; the trigger loop needs the rollup's view.
         delegation::wait_until_delegated(
@@ -492,9 +498,19 @@ fn main() -> Result<()> {
     // the rollup back to L1. Best-effort: triggering has already stopped, so a
     // failure costs nothing this run, and the next startup finds the account
     // still delegated and skips re-delegating.
+    //
+    // Only ours to release, though: a delegation that was already in place at
+    // startup is someone else's, and undelegating it would break whoever is
+    // relying on it.
     if mode::is_ephemeral() {
-        if let Err(e) = delegation::undelegate(&rpc, &cranker, &undelegate_payer) {
-            log::warn!("undelegate on shutdown failed, cranker stays delegated: {e:#}");
+        if delegated_by_us {
+            if let Err(e) = delegation::undelegate(&rpc, &cranker, &undelegate_payer) {
+                log::warn!("undelegate on shutdown failed, cranker stays delegated: {e:#}");
+            }
+        } else {
+            log::info!(
+                "leaving cranker {cranker_pubkey} delegated: the delegation predates this process"
+            );
         }
     }
 
