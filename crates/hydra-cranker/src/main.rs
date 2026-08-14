@@ -17,6 +17,7 @@ use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_keypair::{read_keypair, read_keypair_file, Keypair};
 use solana_pubkey::Pubkey;
+use solana_rpc_client_api::client_error::{Error as ClientError, TransactionError};
 use solana_signer::Signer;
 
 /// Consecutive failures at the same `next_exec_slot` before a crank is parked.
@@ -42,6 +43,11 @@ const CLOSE_RETRY_COOLDOWN_SLOTS: u64 = 10;
 /// never happened. ~12 s of base-layer chain time, ~1.5 s on a rollup, both far
 /// above `processed`-commitment echo latency.
 const OPTIMISTIC_REARM_SLOTS: u64 = 30;
+
+/// Slots between delegation re-checks prompted by a rejected fee payer. The
+/// check is an RPC round-trip and the repair a base-layer transaction, so it
+/// must not run once per failing crank per slot.
+const DELEGATION_RECHECK_COOLDOWN_SLOTS: u64 = 50;
 
 struct FailureState {
     count: u32,
@@ -186,6 +192,44 @@ fn load_keypair(input: &str) -> Result<Keypair> {
     ))
 }
 
+/// Whether a trigger failure is the rollup refusing the cranker as fee payer —
+/// in ephemeral mode, the signature of a delegation that is no longer there.
+///
+/// Preflight and send failures carry the `TransactionError` structurally. The
+/// `--trigger-skip-preflight` path only gets the confirmed status formatted into
+/// a message, so that one is matched as text.
+fn is_invalid_fee_payer(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        e.downcast_ref::<ClientError>()
+            .and_then(ClientError::get_transaction_error)
+            .is_some_and(|te| matches!(te, TransactionError::InvalidAccountForFee))
+    }) || format!("{err:#}").contains("InvalidAccountForFee")
+}
+
+/// Re-establish the cranker's delegation after the rollup rejected it as fee
+/// payer, unless the rollup still considers it delegated (in which case the
+/// failure was something else and there is nothing to repair).
+///
+/// Returns whether this call performed the delegation, so the caller can adopt
+/// it for the shutdown undelegate.
+fn recover_delegation(
+    base: &RpcClient,
+    er: &RpcClient,
+    cranker: &Keypair,
+    timeout: Duration,
+) -> Result<bool> {
+    if delegation::is_delegated(er, &cranker.pubkey())? {
+        return Ok(false);
+    }
+    log::warn!(
+        "cranker {} is no longer delegated; re-delegating",
+        cranker.pubkey()
+    );
+    let took = delegation::ensure_delegated(base, er, cranker)?;
+    delegation::wait_until_delegated(er, &cranker.pubkey(), timeout)?;
+    Ok(took)
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
@@ -224,6 +268,7 @@ fn main() -> Result<()> {
     let mut last_submit: HashMap<Pubkey, u64> = HashMap::new();
     let mut last_close_attempt: HashMap<Pubkey, u64> = HashMap::new();
     let mut last_trigger_attempt_slot: Option<u64> = None;
+    let mut last_delegation_recheck: Option<u64> = None;
 
     // Prometheus metrics endpoint (optional).
     if let Some(port) = args.prometheus_port {
@@ -247,23 +292,31 @@ fn main() -> Result<()> {
     // `InvalidAccountForFee`.
     let mut delegated_by_us = false;
 
-    if mode::is_ephemeral() {
-        log::info!("undelegate payer = {}", undelegate_payer.pubkey());
+    let delegation_timeout = Duration::from_secs(args.delegation_timeout_secs);
+    // Kept for the whole run, not just startup: the trigger loop re-delegates
+    // through it when the rollup starts refusing the cranker as fee payer.
+    let base_rpc = if mode::is_ephemeral() {
         let url = args.base_rpc_url.clone().ok_or_else(|| {
             anyhow!("--base-rpc-url is required with --ephemeral (delegating the cranker keypair is a base-layer transaction)")
         })?;
         log::info!("base rpc = {}", url);
-        let base = RpcClient::new_with_commitment(url, CommitmentConfig::confirmed());
-        delegated_by_us = delegation::ensure_delegated(&base, &rpc, &cranker)?;
+        Some(RpcClient::new_with_commitment(
+            url,
+            CommitmentConfig::confirmed(),
+        ))
+    } else {
+        if args.base_rpc_url.is_some() {
+            log::warn!("--base-rpc-url is ignored without --ephemeral");
+        }
+        None
+    };
+
+    if let Some(base) = &base_rpc {
+        log::info!("undelegate payer = {}", undelegate_payer.pubkey());
+        delegated_by_us = delegation::ensure_delegated(base, &rpc, &cranker)?;
         // Landing on the base layer is not the same as the rollup having seen
         // it; the trigger loop needs the rollup's view.
-        delegation::wait_until_delegated(
-            &rpc,
-            &cranker_pubkey,
-            Duration::from_secs(args.delegation_timeout_secs),
-        )?;
-    } else if args.base_rpc_url.is_some() {
-        log::warn!("--base-rpc-url is ignored without --ephemeral");
+        delegation::wait_until_delegated(&rpc, &cranker_pubkey, delegation_timeout)?;
     }
 
     // Initial bootstrap so the trigger loop has something to scan even if
@@ -452,6 +505,27 @@ fn main() -> Result<()> {
                         .triggers_submitted_total
                         .with_label_values(&["err"])
                         .inc();
+                    // A rejected fee payer means the delegation taken at startup
+                    // is gone — an undelegation that was still in flight when we
+                    // started, or one issued from elsewhere. Nothing else in the
+                    // loop would ever notice: every crank simply fails until it
+                    // parks. Repair it, throttled, and drop the failure records
+                    // it caused.
+                    if let Some(base) = &base_rpc {
+                        let due = last_delegation_recheck
+                            .is_none_or(|at| slot >= at + DELEGATION_RECHECK_COOLDOWN_SLOTS);
+                        if due && is_invalid_fee_payer(&f) {
+                            last_delegation_recheck = Some(slot);
+                            match recover_delegation(base, &rpc, &cranker, delegation_timeout) {
+                                Ok(true) => {
+                                    delegated_by_us = true;
+                                    failures.clear();
+                                }
+                                Ok(false) => {}
+                                Err(e) => log::warn!("re-delegating the cranker failed: {e:#}"),
+                            }
+                        }
+                    }
                     // Anchored on the confirmed schedule, matching the staleness
                     // test above.
                     let at_slot = entry.confirmed_next_exec_slot();
@@ -542,4 +616,40 @@ fn main() -> Result<()> {
     }
 
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use solana_rpc_client_api::client_error::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn a_structured_fee_payer_rejection_is_recognised() {
+        let err = anyhow::Error::new(ClientError::from(ErrorKind::TransactionError(
+            TransactionError::InvalidAccountForFee,
+        )))
+        .context("send_transaction");
+        assert!(is_invalid_fee_payer(&err));
+    }
+
+    #[test]
+    fn the_skip_preflight_confirmation_message_is_recognised() {
+        // `fire::confirm_or_fail` only has the `TransactionError`'s Debug form.
+        let err = anyhow!(
+            "tx 4NqB reverted on-chain: {:?}",
+            TransactionError::InvalidAccountForFee
+        );
+        assert!(is_invalid_fee_payer(&err));
+    }
+
+    #[test]
+    fn other_failures_do_not_trigger_a_re_delegation() {
+        let err = anyhow::Error::new(ClientError::from(ErrorKind::TransactionError(
+            TransactionError::BlockhashNotFound,
+        )))
+        .context("send_transaction");
+        assert!(!is_invalid_fee_payer(&err));
+        assert!(!is_invalid_fee_payer(&anyhow!("malformed crank tail")));
+    }
 }
