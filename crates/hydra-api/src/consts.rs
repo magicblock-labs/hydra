@@ -64,14 +64,6 @@ pub mod base {
     pub const STALENESS_THRESHOLD_SLOTS: u64 = 10 * 86_400_000 / SLOT_FREQUENCY_MS;
 }
 
-/// MagicBlock addresses the ephemeral crank's `Create` / `Cancel` / `Close`
-/// CPI into, re-exported so integrators building those instructions don't need
-/// a direct `ephemeral-rollups-pinocchio` dependency of their own.
-#[cfg(feature = "ephemeral")]
-pub mod magic {
-    pub use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
-}
-
 pub mod ephemeral {
     solana_address::declare_id!("eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf");
 
