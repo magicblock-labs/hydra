@@ -1,0 +1,32 @@
+{
+  "name": "@magicblock-labs/${node_pkg}",
+  "description": "MagicBlock Hydra cranker (${node_pkg})",
+  "version": "${node_version}",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/magicblock-labs/hydra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/magicblock-labs/hydra/issues"
+  },
+  "license": "MIT",
+  "private": false,
+  "author": "Magicblock Labs <dev@magicblock.gg>",
+  "homepage": "https://www.magicblock.xyz/",
+  "bin": {
+    "hydra-cranker": "bin/hydra-cranker"
+  },
+  "files": [
+    "bin"
+  ],
+  "os": [
+    "${node_os}"
+  ],
+  "cpu": [
+    "${node_arch}"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

@@ -1,0 +1,230 @@
+name: Publish cranker packages
+
+# Builds `hydra-cranker` for every supported platform and ships it two ways:
+#   1. as a raw binary attached to the GitHub release, and
+#   2. as a per-platform npm package `@magicblock-labs/hydra-cranker-<os>-<arch>`.
+#
+# npm's `os`/`cpu` fields make each package installable only on the platform it
+# was built for, so a consumer installs the one matching their machine (or lists
+# them as `optionalDependencies` and lets npm pick).
+#
+# Triggers:
+#   - `release: published`  -> real publish, version taken from the workspace
+#   - `push` to `release/v*`-> dry run (smoke-tests the pipeline)
+#   - `workflow_dispatch`   -> dry run by default, opt in to a real publish
+
+on:
+  release:
+    types: [published]
+  push:
+    branches:
+      - "release/v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in dry-run mode (no actual publishing)"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-cranker-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BIN_NAME: hydra-cranker
+  # Keep in sync with `rust-toolchain.toml` and the CI workflow.
+  RUST_VERSION: 1.91.1
+  # `[profile.release] lto = "thin"` is there for the on-chain SBF programs. On a
+  # host build it makes rustc embed LLVM bitcode into the rlibs, and Apple's
+  # linker ships an older libLTO than rustc's LLVM — it then fails to parse that
+  # bitcode and the macOS link dies. LTO buys the cranker nothing (it is I/O
+  # bound, not compute bound), so build it without.
+  CARGO_PROFILE_RELEASE_LTO: false
+
+jobs:
+  publish-cranker:
+    name: ${{ matrix.build.NAME }}
+    runs-on: ${{ matrix.build.OS }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - {
+              NAME: linux-x64-glibc,
+              OS: ubuntu-24.04,
+              TARGET: x86_64-unknown-linux-gnu,
+            }
+          - {
+              NAME: linux-arm64-glibc,
+              OS: ubuntu-24.04-arm,
+              TARGET: aarch64-unknown-linux-gnu,
+            }
+          - {
+              NAME: darwin-x64,
+              OS: macos-15-intel,
+              TARGET: x86_64-apple-darwin,
+            }
+          - {
+              NAME: darwin-arm64,
+              OS: macos-latest,
+              TARGET: aarch64-apple-darwin,
+            }
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.build.TARGET }}
+
+      # `registry-url` writes an .npmrc that reads NODE_AUTH_TOKEN, so the
+      # publish step needs no token juggling of its own.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      # `yellowstone-grpc-proto` pulls in `protobuf-src`, which compiles protoc
+      # from source — that needs cmake and a C++ toolchain, both preinstalled on
+      # the GitHub-hosted images. Nothing else to install.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.build.TARGET }}
+
+      # Dry run unless this is an actual published release, or a manual run that
+      # explicitly opted out.
+      - name: Resolve DRY_RUN
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "DRY_RUN=false" >> "$GITHUB_ENV"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "DRY_RUN=${{ github.event.inputs.dry_run }}" >> "$GITHUB_ENV"
+          else
+            echo "DRY_RUN=true" >> "$GITHUB_ENV"
+          fi
+
+      # No `--locked`: Cargo.lock is gitignored in this repo.
+      - name: Build
+        run: cargo build -p "$BIN_NAME" --release --target ${{ matrix.build.TARGET }}
+
+      # The npm version is *derived* from the workspace version rather than
+      # duplicated, so the two can never drift. On a real release we additionally
+      # require the git tag to name that same version.
+      - name: Resolve version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG_IN: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r --arg bin "$BIN_NAME" '.packages[] | select(.name == $bin) | .version')
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::could not read the $BIN_NAME version from cargo metadata"
+            exit 1
+          fi
+          release_tag="v$version"
+          if [ "$EVENT_NAME" = "release" ]; then
+            release_tag="$RELEASE_TAG_IN"
+            if [ "${release_tag#v}" != "$version" ]; then
+              echo "::error::tag '$release_tag' does not match $BIN_NAME version '$version'"
+              exit 1
+            fi
+          elif [ "$DRY_RUN" = "false" ]; then
+            # A real publish off a dispatch guesses the tag from the workspace
+            # version. Require that release to already exist: the upload step
+            # would otherwise *create* one from this ref, or overwrite the
+            # assets of an existing release with a different commit's binaries.
+            if ! gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::no published release '$release_tag' — cut the release first, or re-run with dry_run"
+              exit 1
+            fi
+          fi
+          echo "node_version=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+          echo "Publishing $BIN_NAME@$version"
+
+      - name: Assemble the npm package
+        run: |
+          set -euo pipefail
+          node_os=$(echo "${{ matrix.build.NAME }}" | cut -d '-' -f1)
+          node_arch=$(echo "${{ matrix.build.NAME }}" | cut -d '-' -f2)
+          node_pkg="${BIN_NAME}-${node_os}-${node_arch}"
+          export node_os node_arch node_pkg
+          echo "node_pkg=${node_pkg}" >> "$GITHUB_ENV"
+
+          mkdir -p "${node_pkg}/bin"
+          node -e '
+            const fs = require("fs");
+            const tmpl = fs.readFileSync(".github/packages/npm-package/package.json.tmpl", "utf8");
+            const out = tmpl.replace(/\$\{(\w+)\}/g, (_, key) => {
+              const value = process.env[key];
+              if (value === undefined) throw new Error(`template variable not set: ${key}`);
+              return value;
+            });
+            JSON.parse(out);
+            fs.writeFileSync(`${process.env.node_pkg}/package.json`, out);
+          '
+          cat "${node_pkg}/package.json"
+
+          cp "target/${{ matrix.build.TARGET }}/release/${BIN_NAME}" "${node_pkg}/bin/"
+          chmod +x "${node_pkg}/bin/${BIN_NAME}"
+
+          # Platform-suffixed copy for the GitHub release assets.
+          release_name="${BIN_NAME}-${{ matrix.build.NAME }}"
+          echo "release_name=${release_name}" >> "$GITHUB_ENV"
+          cp "target/${{ matrix.build.TARGET }}/release/${BIN_NAME}" \
+             "target/${{ matrix.build.TARGET }}/release/${release_name}"
+
+      # Every matrix entry builds natively, so the artifact must run here.
+      - name: Smoke-test the binary
+        run: ./${{ env.node_pkg }}/bin/${{ env.BIN_NAME }} --version
+
+      - name: Upload the binary as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.release_name }}
+          path: target/${{ matrix.build.TARGET }}/release/${{ env.release_name }}
+          if-no-files-found: error
+
+      - name: Publish to npm
+        working-directory: ${{ env.node_pkg }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY_RUN=true — not publishing"
+            npm publish --access public --dry-run
+            exit 0
+          fi
+          pkg="@magicblock-labs/${node_pkg}@${node_version}"
+          if [ -n "$(npm view "$pkg" version 2>/dev/null || true)" ]; then
+            echo "$pkg is already published — nothing to do"
+            exit 0
+          fi
+          npm publish --access public
+
+      - name: Attach the binary to the GitHub release
+        if: env.DRY_RUN == 'false'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: target/${{ matrix.build.TARGET }}/release/${{ env.release_name }}
+          asset_name: ${{ env.release_name }}
+          tag: ${{ env.RELEASE_TAG }}
+          overwrite: true
