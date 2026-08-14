@@ -7,15 +7,16 @@ members = [
     "crates/hydra-api",
     "crates/hydra-cranker",
     "tests",
-    "tests/e2e",
     "tests/programs/noop",
     "examples/native",
     "examples/pinocchio",
 ]
 # `examples/anchor` is its own Anchor workspace (Anchor.toml + programs/*)
-# so `anchor build` works when run from inside it. Excluded here so Cargo
-# doesn't try to merge the two workspaces.
-exclude = ["examples/anchor"]
+# so `anchor build` works when run from inside it. `tests/e2e` is its own
+# workspace too: it pulls the whole `solana-client` tree, which nothing else
+# here needs, and it only ever runs from the dedicated `e2e` CI job. Excluded
+# so Cargo doesn't try to merge the workspaces.
+exclude = ["examples/anchor", "tests/e2e"]
 
 [workspace.package]
 version = "0.2.0"

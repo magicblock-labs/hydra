@@ -11,7 +11,8 @@
 #   - Rust + `cargo build-sbf` (Solana/Anza toolchain)
 #   - cargo-nextest         -> `make install-tools`
 #   - anchor CLI            -> only for `make build-anchor` / `make test-anchor`
-#   - @magicblock-labs/ephemeral-validator (npm) -> only for `make test-e2e`
+#   - node + @magicblock-labs/ephemeral-validator -> `make install-validators`
+#     (needed by `make test-e2e`, and so by `make test-all` / `make ci`)
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -27,6 +28,8 @@ E2E_MANIFEST       := tests/e2e/Cargo.toml
 
 HYDRA_FEATURES := logging,cu-trace
 EPHEMERAL_FEATURES := logging
+
+EPHEMERAL_VALIDATOR_VERSION ?= 0.13.20
 
 CLIPPY := --all-targets -- -D warnings
 
@@ -63,15 +66,17 @@ build-anchor: ## anchor build the anchor example (needs the anchor CLI)
 # ---------------------------------------------------------------------------
 .PHONY: fmt fmt-check lint lint-e2e
 
-fmt: ## Format the workspace and the excluded anchor example
+fmt: ## Format the workspace and the excluded anchor / e2e crates
 	cargo fmt --all
 	cargo fmt --manifest-path $(ANCHOR_MANIFEST) --all
+	cargo fmt --manifest-path $(E2E_MANIFEST) --all
 
 fmt-check: ## Check formatting without writing (CI)
 	cargo fmt --all --check
 	cargo fmt --manifest-path $(ANCHOR_MANIFEST) --all --check
+	cargo fmt --manifest-path $(E2E_MANIFEST) --all --check
 
-lint: ## Clippy the workspace, both programs' optional features, and the anchor example
+lint: ## Clippy the workspace, both programs' optional features, and the anchor example (not e2e — see lint-e2e)
 	cargo clippy --workspace $(CLIPPY)
 	cargo clippy -p hydra --features $(HYDRA_FEATURES) $(CLIPPY)
 	cargo clippy -p hydra-ephemeral --features $(EPHEMERAL_FEATURES) $(CLIPPY)
@@ -98,7 +103,8 @@ test-anchor: build build-anchor ## Run the anchor example mollusk test (needs th
 test-e2e: build ## Live e2e: spawns validators + cranker (needs the ephemeral-validator npm pkg)
 	cargo test --manifest-path $(E2E_MANIFEST) -- --ignored --nocapture --test-threads=1
 
-test-all: test test-examples test-anchor test-e2e ## Run hydra-tests, examples, anchor, and live e2e
+# `test` already covers the examples (they're workspace members).
+test-all: test test-anchor test-e2e ## Run the workspace tests (incl. examples), the anchor example, and the live e2e suite
 
 bench: build ## Run the compute-unit benchmarks
 	cargo bench -p hydra-tests
@@ -109,12 +115,15 @@ cu-table: build ## Print the per-instruction CU table (the ignored cu_table test
 # ---------------------------------------------------------------------------
 # Aggregate / housekeeping.
 # ---------------------------------------------------------------------------
-.PHONY: ci install-tools clean
+.PHONY: ci install-tools install-validators clean
 
-ci: fmt-check lint build test-all ## Run the default CI job locally (fmt-check + lint + build + test-all)
+ci: fmt-check lint lint-e2e build test-all ## Run the CI job locally (fmt-check + lint + build + test-all, incl. live e2e)
 
-install-tools: ## Install cargo-nextest (Solana/anchor/node toolchains are installed separately)
+install-tools: install-validators ## Install cargo-nextest + the MagicBlock validators
 	cargo install cargo-nextest --locked
+
+install-validators: ## npm install -g mb-test-validator + ephemeral-validator (needs node)
+	npm install -g "@magicblock-labs/ephemeral-validator@$(EPHEMERAL_VALIDATOR_VERSION)"
 
 clean: ## Remove Cargo build artifacts
 	cargo clean
