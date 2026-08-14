@@ -259,7 +259,9 @@ hydra-cranker \
 # `--rpc-url` points at the rollup; `--base-rpc-url` is required alongside it,
 # because the cranker delegates its own keypair at startup so the rollup will
 # let its balance change as the trigger fee payer, and delegating is a
-# base-layer transaction.
+# base-layer transaction. On shutdown it releases that delegation — but only if
+# it was the one to take it; a keypair already delegated at startup is left
+# alone, since something else owns that delegation.
 hydra-cranker \
   --keypair ~/.config/solana/cranker.json \
   --rpc-url https://your.rollup.example \
