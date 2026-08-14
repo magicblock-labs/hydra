@@ -95,8 +95,8 @@ Run `make help` to list the available targets. Common commands:
 - `make test-examples` — run the native and Pinocchio example tests.
 - `make test-e2e` — run the live ephemeral-rollup e2e test.
 - `make cu-table` — reproduce the compute-unit table.
-- `make ci` — run the default CI checks locally.
-- `make install-tools` — install `cargo-nextest`.
+- `make ci` — run the full CI job locally (includes the live e2e test).
+- `make install-tools` — install `cargo-nextest` and the MagicBlock validators.
 - `make clean` — remove Cargo build artifacts.
 
 ```sh
@@ -448,7 +448,7 @@ The validators ship as an npm package; `mb-test-validator` wraps
 `solana-test-validator`, so the Solana/Anza toolchain must also be installed:
 
 ```sh
-npm install -g @magicblock-labs/ephemeral-validator   # mb-test-validator + ephemeral-validator
+make install-validators   # npm install -g the pinned mb-test-validator + ephemeral-validator
 
 # The test is `#[ignore]` (it spawns external validators); run it explicitly.
 # `make test-e2e` builds the on-chain artifacts the rollup clones first. The
@@ -456,9 +456,10 @@ npm install -g @magicblock-labs/ephemeral-validator   # mb-test-validator + ephe
 make test-e2e
 ```
 
-`tests/e2e` is its own workspace, so `make lint` skips it — `make lint-e2e`
-clippies it separately. CI runs both as the `e2e` job in
-`.github/workflows/ci.yml`.
+`tests/e2e` is its own workspace (it is `exclude`d from the root one), so
+`make lint` and `make test` skip it — `make lint-e2e` clippies it separately.
+`make test-all` and `make ci` do run it, so both need the validators installed;
+CI does the same in its `default` job.
 
 ## Releasing
 

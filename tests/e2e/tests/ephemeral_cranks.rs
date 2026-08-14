@@ -93,19 +93,21 @@ const BASE_WS_PORT: u16 = BASE_RPC_PORT + 1;
 const BASE_FAUCET_PORT: u16 = BASE_RPC_PORT + 2;
 const BASE_GOSSIP_PORT: u16 = BASE_RPC_PORT + 3;
 const BASE_DYNAMIC_PORT_RANGE: &str = "7110-7140";
-/// Ephemeral rollup RPC port. Aperture serves RPC + WS on the same address,
-/// which is exactly what the cranker's `http→ws` URL derivation assumes.
+/// Ephemeral rollup RPC port. The rollup serves its WebSocket on `RPC + 1`,
+/// unlike the cranker's default same-port `http→ws` derivation, so both the
+/// cranker and this test's log watcher are given an explicit WS URL.
 const ER_RPC_PORT: u16 = 7799;
+const ER_WS_PORT: u16 = ER_RPC_PORT + 1;
 
 /// CI runs these ignored tests back-to-back on fixed ports. If a validator
 /// wrapper leaves its real child outside our process group, sweep only these
 /// e2e process names before the next scenario starts.
 const STACK_PROCESS_PATTERN: &str = "[m]b-test-validator|[e]phemeral-validator|[h]ydra-cranker";
 
-/// The bundled noop program — its on-chain address is its build keypair's
-/// pubkey (`target/deploy/hydra_noop-keypair.json`). Scheduled cranks point at
-/// it; it ignores its accounts and data.
-const NOOP_ID: &str = "CftjNLnvyBFcEqShc2VRcESCpPnUfDaFub1wgnGCqtHv";
+/// The bundled noop program, at the canonical address the mollusk suite uses
+/// (`program-id` in `tests/programs/noop/Cargo.toml`); `--bpf-program` loads it
+/// there at genesis. Scheduled cranks point at it; it ignores accounts and data.
+const NOOP_ID: &str = "4sdZFwGE7TkQCJVpfggvfy2ZwGNCfF6hAMJYjZU5HpZG";
 
 const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 
@@ -128,8 +130,10 @@ const NOOP_FIRED_PREFIX: &str = "noop-fired:";
 /// so `SLOT_FREQUENCY_MS` from that crate reflects base-layer timing.
 const ROLLUP_SLOT_MS: u64 = 50;
 
-/// Overall wall-clock budget for all cranks to reach `TARGET_EXECUTIONS`.
-/// Derived from rollup slot timing (not base-layer `SLOT_FREQUENCY_MS`).
+/// Overall wall-clock budget for all cranks to reach `TARGET_EXECUTIONS`,
+/// measured from the moment the last of the stack is up and the cranks exist
+/// (see [`LogFireWatcher::wait_until`]), never from process startup. Derived
+/// from rollup slot timing (not base-layer `SLOT_FREQUENCY_MS`).
 const EXEC_DEADLINE: Duration =
     Duration::from_millis(ROLLUP_SLOT_MS * INTERVAL_SLOTS * TARGET_EXECUTIONS * 100);
 
@@ -198,8 +202,10 @@ fn run_scenario(order: CreateOrder) {
     // panic never leaks child processes.
     drop(stack);
     cleanup_leftover_stack_processes();
-    wait_for_ports_free(Duration::from_secs(5)).expect("e2e ports released");
+    let ports = wait_for_ports_free(Duration::from_secs(5));
+    // The scenario's own failure is the interesting one, so it panics first.
     result.expect("e2e ephemeral crank test");
+    ports.expect("e2e ports released");
 }
 
 fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
@@ -345,10 +351,7 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
         }
         CreateOrder::AfterCranker => {
             spawn_cranker(stack, &cranker_bin, &cranker_kp_path, &tmp)?;
-            // Let the cranker bootstrap (finding zero cranks) and connect its
-            // programSubscribe watcher before any crank exists.
-            std::thread::sleep(Duration::from_millis(500));
-            assert_cranker_bootstrapped_empty(&tmp)?;
+            assert_cranker_watching_empty(&tmp)?;
             eprintln!("[stack] cranker is up with an empty cache; creating cranks now");
             create_cranks(&sponsor, &fee_payer, noop_id)?
         }
@@ -360,6 +363,7 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
     //    carries a distinct id in its ix data; the noop program logs
     //    `noop-fired:<id>` and the watcher attributes fires from those notifications.
     let watch = log_watcher.wait_until(EXEC_DEADLINE)?;
+    drop(log_watcher);
 
     // 7. Report + assert.
     let mut failures = Vec::new();
@@ -398,10 +402,18 @@ fn body(stack: &mut Stack, order: CreateOrder) -> Result<()> {
 fn wait_until_undelegated(base: &RpcClient, account: &Pubkey, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
+        // Only a *missing* account proves undelegation; any other RPC error is
+        // transient and must not let the assertion pass vacuously.
         let delegated = match base.get_account(account) {
             Ok(a) => a.owner == delegation_program_id(),
-            // A vanished account is certainly not delegated.
-            Err(_) => false,
+            Err(e) if e.to_string().contains("AccountNotFound") => false,
+            Err(e) if Instant::now() >= deadline => {
+                return Err(anyhow::Error::new(e).context("read cranker account on base"))
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
         };
         if !delegated {
             return Ok(());
@@ -420,8 +432,12 @@ fn assert_ports_free() -> Result<()> {
     use std::net::TcpListener;
     for (port, label) in [
         (BASE_RPC_PORT, "mb-test-validator"),
+        (BASE_WS_PORT, "mb-test-validator pubsub"),
         (BASE_FAUCET_PORT, "mb-test-validator faucet"),
         (ER_RPC_PORT, "ephemeral-validator"),
+        // A stale process on the WS port alone leaves the new rollup's RPC
+        // looking healthy while the cranker and watcher attach to the old one.
+        (ER_WS_PORT, "ephemeral-validator pubsub"),
     ] {
         if TcpListener::bind(("127.0.0.1", port)).is_err() {
             bail!(
@@ -527,9 +543,7 @@ fn spawn_cranker_process(
 ) -> Result<Child> {
     eprintln!("[stack] starting hydra-cranker → rollup");
     let rpc_url = format!("http://127.0.0.1:{ER_RPC_PORT}");
-    // The rollup serves RPC and WebSocket on separate ports (RPC+1), unlike the
-    // cranker's default same-port `http→ws` derivation.
-    let ws_url = format!("ws://127.0.0.1:{}", ER_RPC_PORT + 1);
+    let ws_url = format!("ws://127.0.0.1:{ER_WS_PORT}");
     let base_rpc_url = format!("http://127.0.0.1:{BASE_RPC_PORT}");
     let mut args: Vec<&str> = vec![
         "--rpc-url",
@@ -591,33 +605,42 @@ fn assert_cranker_exits_undelegated(
     }
 
     // The message is the whole point — an operator has to be able to tell this
-    // apart from an ordinary RPC problem.
+    // apart from an ordinary RPC problem. Match the two ways the startup
+    // delegation actually fails, not the bare word "delegat": the happy-path
+    // "delegating cranker … to validator …" line is logged before the send, so
+    // it is present in every run and would match anything.
     let log = fs::read_to_string(tmp.join("cranker.log")).unwrap_or_default();
-    if !log.contains("delegat") {
-        bail!("cranker exited {status:?} but never mentioned delegation:\n{log}");
+    if !log.contains("delegate cranker") && !log.contains("is not delegated to this rollup") {
+        bail!("cranker exited {status:?} but not with a delegation failure:\n{log}");
     }
     eprintln!("[stack] cranker refused to start while undelegated ({status})");
     Ok(())
 }
 
-/// Assert the cranker's startup bootstrap found zero cranks — proving that any
-/// cranks it later fires were discovered via live `programSubscribe`
-/// notifications, not the bootstrap scan. The cranker logs
-/// `bootstrap: N crank(s) cached` at startup (info level).
-fn assert_cranker_bootstrapped_empty(tmp: &Path) -> Result<()> {
+/// Assert the cranker cached zero cranks at startup *and* that its
+/// `programSubscribe` watcher is connected. Both matter: the empty cache proves
+/// a later fire came from a live notification rather than a bootstrap scan, and
+/// waiting for the subscription closes the window in which a crank created
+/// between the watcher's own `getProgramAccounts` scan (`watch.rs`) and its
+/// subscribe would never be discovered at all.
+fn assert_cranker_watching_empty(tmp: &Path) -> Result<()> {
     let log = tmp.join("cranker.log");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let contents = fs::read_to_string(&log).unwrap_or_default();
-        if contents.contains("bootstrap: 0 crank(s) cached") {
-            return Ok(());
-        }
-        // Guard against a cranker that somehow saw cranks at bootstrap.
-        if let Some(line) = contents.lines().find(|l| l.contains("crank(s) cached")) {
+        if let Some(line) = contents
+            .lines()
+            .find(|l| l.contains("crank(s) cached") && !l.contains("bootstrap: 0 crank(s) cached"))
+        {
             bail!("cranker bootstrap was not empty: {line:?}");
         }
+        if contents.contains("bootstrap: 0 crank(s) cached")
+            && contents.contains("programSubscribe connected")
+        {
+            return Ok(());
+        }
         if Instant::now() >= deadline {
-            bail!("cranker did not log a bootstrap result within 10s");
+            bail!("cranker did not bootstrap and connect programSubscribe within 10s");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -761,18 +784,17 @@ struct FireWatch {
 /// Background `logsSubscribe` on the noop program. Accumulates `noop-fired:<id>`
 /// notifications until [`LogFireWatcher::wait_until`] returns.
 struct LogFireWatcher {
-    started: Instant,
     state: Arc<Mutex<FireWatch>>,
     shutdown: Arc<AtomicBool>,
     // The synchronous client's Drop is documented as unbounded, so it is never
     // run inline — [`close_subscription`] releases it off-thread instead.
     sub: ManuallyDrop<solana_pubsub_client::pubsub_client::PubsubLogsClientSubscription>,
-    thread: JoinHandle<()>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl LogFireWatcher {
     fn spawn(noop_id: Pubkey) -> Result<Self> {
-        let ws_url = format!("ws://127.0.0.1:{}", ER_RPC_PORT + 1);
+        let ws_url = format!("ws://127.0.0.1:{ER_WS_PORT}");
         let (sub, rx) = PubsubClient::logs_subscribe(
             &ws_url,
             RpcTransactionLogsFilter::Mentions(vec![noop_id.to_string()]),
@@ -826,16 +848,21 @@ impl LogFireWatcher {
         });
 
         Ok(Self {
-            started,
             state,
             shutdown,
             sub: ManuallyDrop::new(sub),
-            thread,
+            thread: Some(thread),
         })
     }
 
-    fn wait_until(self, deadline: Duration) -> Result<FireWatch> {
-        while self.started.elapsed() < deadline {
+    /// Wait up to `deadline` for every crank to reach `TARGET_EXECUTIONS`. The
+    /// clock starts *here*, not at [`Self::spawn`]: the watcher is created
+    /// before the cranks and the cranker exist, and their setup (confirmed
+    /// transactions, the cranker's self-delegation) can easily outlast the
+    /// budget on its own.
+    fn wait_until(&self, deadline: Duration) -> Result<FireWatch> {
+        let started = Instant::now();
+        while started.elapsed() < deadline {
             let done = {
                 let guard = self.state.lock().expect("fire watch poisoned");
                 guard.fires.iter().flatten().all(|fire| fire.is_some())
@@ -845,18 +872,28 @@ impl LogFireWatcher {
             }
             thread::sleep(Duration::from_millis(200));
         }
-        self.shutdown.store(true, Ordering::Relaxed);
-        let _ = self.thread.join();
-        let watch = self.state.lock().expect("fire watch poisoned").clone();
-        close_subscription(self.sub);
-        Ok(watch)
+        Ok(self.state.lock().expect("fire watch poisoned").clone())
     }
 }
 
-fn close_subscription(sub: ManuallyDrop<PubsubLogsClientSubscription>) {
+/// Tear the subscription down on *any* exit path, so an error between
+/// [`LogFireWatcher::spawn`] and the wait never leaks a live socket and a
+/// spinning thread into the rest of the test binary.
+impl Drop for LogFireWatcher {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        // SAFETY: `sub` is taken exactly once, here, and never touched again.
+        close_subscription(unsafe { ManuallyDrop::take(&mut self.sub) });
+    }
+}
+
+fn close_subscription(sub: PubsubLogsClientSubscription) {
     let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
     thread::spawn(move || {
-        drop(ManuallyDrop::into_inner(sub));
+        drop(sub);
         let _ = done_tx.send(());
     });
     match done_rx.recv_timeout(Duration::from_millis(500)) {

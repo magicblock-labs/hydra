@@ -1,3 +1,8 @@
+# Its own workspace (and `exclude`d from the root one): the live e2e suite pulls
+# the whole `solana-client` tree, which no other crate here needs, and it only
+# runs from `make test-e2e` / the dedicated `e2e` CI job.
+[workspace]
+
 [package]
 name = "hydra-e2e-tests"
 version = "0.0.0"
