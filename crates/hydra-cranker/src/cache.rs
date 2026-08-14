@@ -38,6 +38,20 @@ pub struct CrankEntry {
     /// `0` = cranker omits `SetComputeUnitLimit`.
     pub cu_limit: u32,
     pub data: Vec<u8>,
+    /// Set while `next_exec_slot` holds a locally-replayed `Trigger` advance
+    /// that no on-chain update has confirmed yet. Always `None` on an entry
+    /// decoded from account bytes, so any authoritative update clears it.
+    pub optimistic: Option<Optimistic>,
+}
+
+/// A `Trigger` advance applied to the cache on submit, before the chain has
+/// confirmed it. Kept so the advance can be undone if it never lands.
+#[derive(Clone, Copy)]
+pub struct Optimistic {
+    /// `next_exec_slot` before the advance, restored on re-arm.
+    pub prev_next_exec_slot: u64,
+    /// Slot the advance was applied at; the re-arm window runs from here.
+    pub at_slot: u64,
 }
 
 fn cranker_reward() -> u64 {
@@ -81,6 +95,7 @@ impl CrankEntry {
             rent_min,
             cu_limit,
             data: data.to_vec(),
+            optimistic: None,
         })
     }
 
@@ -187,7 +202,11 @@ pub enum CacheOutcome {
 /// double-advance. A late, *pre*-trigger notification can still overwrite this with
 /// a stale value — that self-heals, because the next fire then lands as
 /// `NotYetExecutable` and the caller's backoff absorbs it.
-pub fn advance_after_trigger(cache: &Cache, pubkey: Pubkey, fired_at_next_exec: u64) {
+///
+/// The advance is only a guess — an accepted submit is not a landed transaction —
+/// so it is recorded as [`Optimistic`] and undone by [`rearm_unconfirmed`] if no
+/// on-chain update ever confirms it.
+pub fn advance_after_trigger(cache: &Cache, pubkey: Pubkey, fired_at_next_exec: u64, slot: u64) {
     let mut guard = cache.lock().expect("cache poisoned");
     if let Some(e) = guard.get_mut(&pubkey) {
         // Only the entry we actually fired on; a newer echo supersedes us.
@@ -195,7 +214,39 @@ pub fn advance_after_trigger(cache: &Cache, pubkey: Pubkey, fired_at_next_exec: 
             return;
         }
         e.next_exec_slot = e.next_exec_slot.saturating_add(e.interval_slots);
+        e.optimistic = Some(Optimistic {
+            prev_next_exec_slot: fired_at_next_exec,
+            at_slot: slot,
+        });
     }
+}
+
+/// Undo optimistic advances that no on-chain update has confirmed within
+/// `limit` slots, and return the cranks re-armed.
+///
+/// A submitted `Trigger` can be dropped after the RPC accepts it (a blockhash
+/// race, a leader drop, congestion — and with preflight on there is no
+/// confirmation at all). Nothing then changes on-chain, so no
+/// `programSubscribe` notification ever arrives to correct the cache, and
+/// without this the crank would sit out a full `interval_slots` — hours, for a
+/// long-interval crank — on a fire that never happened.
+///
+/// Re-arming an advance that *did* land is harmless: the crank is simply
+/// re-offered once its real `next_exec_slot` has passed, and an early re-fire
+/// reverts as `NotYetExecutable` into the caller's backoff.
+pub fn rearm_unconfirmed(cache: &Cache, current_slot: u64, limit: u64) -> Vec<Pubkey> {
+    let mut guard = cache.lock().expect("cache poisoned");
+    let mut rearmed = Vec::new();
+    for (pk, e) in guard.iter_mut() {
+        let Some(opt) = e.optimistic else { continue };
+        if current_slot.saturating_sub(opt.at_slot) < limit {
+            continue;
+        }
+        e.next_exec_slot = opt.prev_next_exec_slot;
+        e.optimistic = None;
+        rearmed.push(*pk);
+    }
+    rearmed
 }
 
 /// Apply a single account update to the cache. Removes entries that have
@@ -264,6 +315,7 @@ mod tests {
             rent_min: 0,
             cu_limit: 0,
             data: Vec::new(),
+            optimistic: None,
         }
     }
 
@@ -283,7 +335,7 @@ mod tests {
     fn advance_replays_the_schedule_but_not_the_countdown() {
         let cache = new_cache();
         let pk = seed(&cache, entry(100, 5, 3));
-        advance_after_trigger(&cache, pk, 100);
+        advance_after_trigger(&cache, pk, 100, 100);
         assert_eq!(
             snapshot(&cache, &pk),
             (105, 3),
@@ -296,7 +348,7 @@ mod tests {
         mode::init(false);
         let cache = new_cache();
         let pk = seed(&cache, entry(100, 5, 1));
-        advance_after_trigger(&cache, pk, 100);
+        advance_after_trigger(&cache, pk, 100, 100);
         assert_eq!(snapshot(&cache, &pk), (105, 1), "remaining stays 1");
         let g = cache.lock().unwrap();
         let e = g.get(&pk).unwrap();
@@ -332,7 +384,7 @@ mod tests {
         // A `programSubscribe` update landed first, advancing the entry to 105.
         let pk = seed(&cache, entry(105, 5, 2));
         // We fired on the older snapshot (100); the guard must not double-advance.
-        advance_after_trigger(&cache, pk, 100);
+        advance_after_trigger(&cache, pk, 100, 100);
         assert_eq!(
             snapshot(&cache, &pk),
             (105, 2),
@@ -344,11 +396,57 @@ mod tests {
     fn advance_keeps_the_infinite_remaining_sentinel() {
         let cache = new_cache();
         let pk = seed(&cache, entry(100, 1, REMAINING_INFINITE));
-        advance_after_trigger(&cache, pk, 100);
+        advance_after_trigger(&cache, pk, 100, 100);
         assert_eq!(
             snapshot(&cache, &pk),
             (101, REMAINING_INFINITE),
             "infinite cranks advance the schedule but never decrement remaining"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_advance_is_undone_once_the_window_lapses() {
+        let cache = new_cache();
+        let pk = seed(&cache, entry(100, 1_000, 5));
+        advance_after_trigger(&cache, pk, 100, 100);
+        assert_eq!(snapshot(&cache, &pk), (1_100, 5));
+
+        assert!(
+            rearm_unconfirmed(&cache, 129, 30).is_empty(),
+            "still inside the window; the echo may yet arrive"
+        );
+        assert_eq!(snapshot(&cache, &pk), (1_100, 5));
+
+        assert_eq!(rearm_unconfirmed(&cache, 130, 30), vec![pk]);
+        assert_eq!(
+            snapshot(&cache, &pk),
+            (100, 5),
+            "a submit that never landed must not cost a whole interval"
+        );
+        assert!(
+            rearm_unconfirmed(&cache, 200, 30).is_empty(),
+            "re-arming is one-shot"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_advance_is_never_re_armed() {
+        let cache = new_cache();
+        let pk = seed(&cache, entry(100, 1_000, 5));
+        advance_after_trigger(&cache, pk, 100, 100);
+
+        // The `programSubscribe` echo lands: the entry is rebuilt from account
+        // bytes, which clears the optimistic marker.
+        let mut raw = vec![0u8; CRANK_HEADER_SIZE];
+        raw[64..72].copy_from_slice(&1_100u64.to_le_bytes());
+        raw[80..88].copy_from_slice(&4u64.to_le_bytes());
+        apply_update(&cache, pk, 1, &raw);
+
+        assert!(rearm_unconfirmed(&cache, 500, 30).is_empty());
+        assert_eq!(
+            snapshot(&cache, &pk),
+            (1_100, 4),
+            "the chain's own schedule stands"
         );
     }
 
