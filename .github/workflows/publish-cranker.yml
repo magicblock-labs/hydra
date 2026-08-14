@@ -18,11 +18,11 @@ on:
     types: [published]
   push:
     branches:
-      - 'release/v*'
+      - "release/v*"
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Run in dry-run mode (no actual publishing)'
+        description: "Run in dry-run mode (no actual publishing)"
         required: true
         type: boolean
         default: true
@@ -53,10 +53,26 @@ jobs:
       fail-fast: false
       matrix:
         build:
-          - { NAME: linux-x64-glibc,   OS: ubuntu-latest,    TARGET: x86_64-unknown-linux-gnu }
-          - { NAME: linux-arm64-glibc, OS: ubuntu-24.04-arm, TARGET: aarch64-unknown-linux-gnu }
-          - { NAME: darwin-x64,        OS: macos-13,         TARGET: x86_64-apple-darwin }
-          - { NAME: darwin-arm64,      OS: macos-latest,     TARGET: aarch64-apple-darwin }
+          - {
+              NAME: linux-x64-glibc,
+              OS: ubuntu-24.04,
+              TARGET: x86_64-unknown-linux-gnu,
+            }
+          - {
+              NAME: linux-arm64-glibc,
+              OS: ubuntu-24.04-arm,
+              TARGET: aarch64-unknown-linux-gnu,
+            }
+          - {
+              NAME: darwin-x64,
+              OS: macos-15-intel,
+              TARGET: x86_64-apple-darwin,
+            }
+          - {
+              NAME: darwin-arm64,
+              OS: macos-latest,
+              TARGET: aarch64-apple-darwin,
+            }
 
     defaults:
       run:
@@ -64,6 +80,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -107,6 +125,10 @@ jobs:
       # duplicated, so the two can never drift. On a real release we additionally
       # require the git tag to name that same version.
       - name: Resolve version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG_IN: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version=1 \
@@ -116,10 +138,19 @@ jobs:
             exit 1
           fi
           release_tag="v$version"
-          if [ "${{ github.event_name }}" = "release" ]; then
-            release_tag="${{ github.event.release.tag_name }}"
+          if [ "$EVENT_NAME" = "release" ]; then
+            release_tag="$RELEASE_TAG_IN"
             if [ "${release_tag#v}" != "$version" ]; then
               echo "::error::tag '$release_tag' does not match $BIN_NAME version '$version'"
+              exit 1
+            fi
+          elif [ "$DRY_RUN" = "false" ]; then
+            # A real publish off a dispatch guesses the tag from the workspace
+            # version. Require that release to already exist: the upload step
+            # would otherwise *create* one from this ref, or overwrite the
+            # assets of an existing release with a different commit's binaries.
+            if ! gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::no published release '$release_tag' — cut the release first, or re-run with dry_run"
               exit 1
             fi
           fi
@@ -137,8 +168,6 @@ jobs:
           echo "node_pkg=${node_pkg}" >> "$GITHUB_ENV"
 
           mkdir -p "${node_pkg}/bin"
-          # Rendered with node rather than `envsubst`, which isn't present on the
-          # macOS images. Parsing the result also validates the template.
           node -e '
             const fs = require("fs");
             const tmpl = fs.readFileSync(".github/packages/npm-package/package.json.tmpl", "utf8");
@@ -172,16 +201,6 @@ jobs:
           path: target/${{ matrix.build.TARGET }}/release/${{ env.release_name }}
           if-no-files-found: error
 
-      - name: Attach the binary to the GitHub release
-        if: env.DRY_RUN == 'false'
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/${{ matrix.build.TARGET }}/release/${{ env.release_name }}
-          asset_name: ${{ env.release_name }}
-          tag: ${{ env.RELEASE_TAG }}
-          overwrite: true
-
       - name: Publish to npm
         working-directory: ${{ env.node_pkg }}
         env:
@@ -191,6 +210,21 @@ jobs:
           if [ "$DRY_RUN" = "true" ]; then
             echo "DRY_RUN=true — not publishing"
             npm publish --access public --dry-run
-          else
-            npm publish --access public
+            exit 0
           fi
+          pkg="@magicblock-labs/${node_pkg}@${node_version}"
+          if [ -n "$(npm view "$pkg" version 2>/dev/null || true)" ]; then
+            echo "$pkg is already published — nothing to do"
+            exit 0
+          fi
+          npm publish --access public
+
+      - name: Attach the binary to the GitHub release
+        if: env.DRY_RUN == 'false'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: target/${{ matrix.build.TARGET }}/release/${{ env.release_name }}
+          asset_name: ${{ env.release_name }}
+          tag: ${{ env.RELEASE_TAG }}
+          overwrite: true
