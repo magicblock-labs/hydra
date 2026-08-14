@@ -99,6 +99,19 @@ impl CrankEntry {
         })
     }
 
+    /// The newest `next_exec_slot` the *chain* has reported: `next_exec_slot`
+    /// with any still-unconfirmed local advance backed out.
+    ///
+    /// Failure bookkeeping keys on this rather than on `next_exec_slot`, so an
+    /// accepted-but-dropped submit cannot pass for on-chain progress and reset
+    /// a crank's consecutive-failure count.
+    pub fn confirmed_next_exec_slot(&self) -> u64 {
+        match self.optimistic {
+            Some(o) => o.prev_next_exec_slot,
+            None => self.next_exec_slot,
+        }
+    }
+
     /// Mirrors Hydra's on-chain Trigger pre-flight: slot reached, not
     /// exhausted, enough lamports to cover reward + tip above the rent floor.
     pub fn is_eligible(&self, current_slot: u64) -> bool {
@@ -426,6 +439,22 @@ mod tests {
         assert!(
             rearm_unconfirmed(&cache, 200, 30).is_empty(),
             "re-arming is one-shot"
+        );
+    }
+
+    #[test]
+    fn an_optimistic_advance_is_not_confirmed_progress() {
+        let cache = new_cache();
+        let pk = seed(&cache, entry(100, 5, 5));
+        advance_after_trigger(&cache, pk, 100, 100);
+
+        let g = cache.lock().unwrap();
+        let e = g.get(&pk).unwrap();
+        assert_eq!(e.next_exec_slot, 105, "the schedule moved for firing");
+        assert_eq!(
+            e.confirmed_next_exec_slot(),
+            100,
+            "but a failure record taken at 100 must not read as stale"
         );
     }
 

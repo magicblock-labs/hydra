@@ -396,10 +396,12 @@ fn main() -> Result<()> {
                     continue;
                 }
             }
-            // Only skip when `at_slot` still matches: a fresh `next_exec_slot`
-            // means the crank advanced and the prior failure record is stale.
+            // Only skip when `at_slot` still matches: a fresh *confirmed*
+            // `next_exec_slot` means the crank really advanced and the prior
+            // failure record is stale. The optimistic advance is excluded on
+            // purpose — it is our own guess, not evidence of progress.
             if let Some(state) = failures.get(&entry.pubkey) {
-                if state.at_slot == entry.next_exec_slot {
+                if state.at_slot == entry.confirmed_next_exec_slot() {
                     if state.count >= MAX_CONSECUTIVE_FAILURES {
                         parked_now += 1;
                         continue;
@@ -438,9 +440,11 @@ fn main() -> Result<()> {
                     // the crank's next fire follows its `interval_slots` instead
                     // of stalling until the `programSubscribe` echo catches up.
                     cache::advance_after_trigger(&cache, entry.pubkey, entry.next_exec_slot, slot);
-                    // Failure record clears only when the cache observes an
-                    // advanced `next_exec_slot`; submit-Ok alone isn't proof
-                    // the tx landed.
+                    // The failure record is deliberately left alone: it clears
+                    // only once the chain confirms an advanced `next_exec_slot`
+                    // (`CrankEntry::confirmed_next_exec_slot`), because the
+                    // advance just made above — like submit-Ok itself — is no
+                    // proof the tx landed.
                 }
                 Err(f) => {
                     log::debug!("slot {}: trigger {} dropped: {:#}", slot, entry.pubkey, f);
@@ -448,15 +452,18 @@ fn main() -> Result<()> {
                         .triggers_submitted_total
                         .with_label_values(&["err"])
                         .inc();
+                    // Anchored on the confirmed schedule, matching the staleness
+                    // test above.
+                    let at_slot = entry.confirmed_next_exec_slot();
                     let rec = failures.entry(entry.pubkey).or_insert(FailureState {
                         count: 0,
-                        at_slot: entry.next_exec_slot,
+                        at_slot,
                         next_retry_slot: 0,
                     });
-                    if rec.at_slot != entry.next_exec_slot {
+                    if rec.at_slot != at_slot {
                         *rec = FailureState {
                             count: 1,
-                            at_slot: entry.next_exec_slot,
+                            at_slot,
                             next_retry_slot: slot + retry_backoff_slots(1),
                         };
                     } else {
@@ -467,7 +474,7 @@ fn main() -> Result<()> {
                                 "parking crank {} after {} consecutive failures at slot {}: {:#}",
                                 entry.pubkey,
                                 rec.count,
-                                entry.next_exec_slot,
+                                at_slot,
                                 f
                             );
                         }
