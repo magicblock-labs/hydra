@@ -48,9 +48,9 @@ fn schedule_creates_crank_via_cpi_into_hydra() {
 
     // Derive the crank PDA from the seed we'll pass in.
     let seed = [0x55u8; 32];
-    let (crank_addr, _bump) = hydra_api::state::find_crank_pda(&seed);
-    let crank = Pubkey::new_from_array(crank_addr.to_bytes());
     let payer = Pubkey::new_unique();
+    let (crank_addr, _bump) = hydra_api::state::find_crank_pda(&payer.to_bytes(), &seed);
+    let crank = Pubkey::new_from_array(crank_addr.to_bytes());
     let target_program_id = Pubkey::new_unique();
     let tick: &[u8] = b"tick";
 

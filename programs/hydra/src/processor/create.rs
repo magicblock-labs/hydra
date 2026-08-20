@@ -83,12 +83,26 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
         return Err(HydraError::InvalidSchedule.into());
     }
 
-    // Derive expected PDA and verify match.
-    let (expected_pda, bump) =
-        Address::find_program_address(&[CRANK_SEED_PREFIX, seed.as_ref()], &hydra_api::ID);
-    if crank_ai.address() != &expected_pda {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    // Derive the payer-bound PDA (`[b"crank", payer, seed]`) — squat-proof:
+    // a different payer derives a different address.
+    let payer_key = payer.address();
+    let (expected_pda, bump) = Address::find_program_address(
+        &[CRANK_SEED_PREFIX, payer_key.as_ref(), seed.as_ref()],
+        &hydra_api::ID,
+    );
+    let payer_bound = crank_ai.address() == &expected_pda;
+    // DEPRECATED: legacy unscoped derivation (`[b"crank", seed]`) is squattable.
+    // TODO: remove this fallback once all integrators are on payer-bound PDAs.
+    let bump = if payer_bound {
+        bump
+    } else {
+        let (legacy_pda, legacy_bump) =
+            Address::find_program_address(&[CRANK_SEED_PREFIX, seed.as_ref()], &hydra_api::ID);
+        if crank_ai.address() != &legacy_pda {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        legacy_bump
+    };
 
     let total_size = CRANK_HEADER_SIZE + upper_region;
 
@@ -98,12 +112,22 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
 
     // Sign the CreateAccount with the PDA's seeds so it owns itself on creation.
     let bump_arr = [bump];
-    let seeds_arr = [
+    let payer_seeds = [
+        Seed::from(CRANK_SEED_PREFIX),
+        Seed::from(payer_key.as_ref()),
+        Seed::from(seed.as_ref()),
+        Seed::from(&bump_arr),
+    ];
+    let legacy_seeds = [
         Seed::from(CRANK_SEED_PREFIX),
         Seed::from(seed.as_ref()),
         Seed::from(&bump_arr),
     ];
-    let signers = [Signer::from(&seeds_arr)];
+    let signers = [if payer_bound {
+        Signer::from(&payer_seeds[..])
+    } else {
+        Signer::from(&legacy_seeds[..])
+    }];
 
     #[cfg(feature = "create-account-allow-prefund")]
     {

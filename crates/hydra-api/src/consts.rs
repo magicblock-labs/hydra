@@ -1,7 +1,8 @@
 //! Numeric constants, feature bits, and bounds that both the on-chain
 //! program and its clients reference.
 
-/// Seed prefix for the Crank PDA: `[b"crank", seed_bytes]`.
+/// Seed prefix for the Crank PDA: `[b"crank", payer, seed_bytes]`
+/// (legacy, deprecated: `[b"crank", seed_bytes]`).
 pub const CRANK_SEED_PREFIX: &[u8] = b"crank";
 
 /// Solana base transaction fee (lamports per signature).

@@ -51,7 +51,7 @@ pub mod hydra_example_anchor {
 pub struct Schedule<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    /// CHECK: Hydra validates this PDA matches `[b"crank", seed]` at Create.
+    /// CHECK: Hydra validates this PDA matches `[b"crank", payer, seed]` at Create.
     #[account(mut)]
     pub crank: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,

@@ -65,9 +65,18 @@ mod client {
         Pubkey::new_from_array(crate::ID.to_bytes())
     }
 
-    /// Derive `(crank_pda, bump)` using `solana_pubkey::Pubkey`.
-    pub fn find_crank_pda(seed: &[u8; 32]) -> (Pubkey, u8) {
-        let (addr, bump) = crate::state::find_crank_pda(seed);
+    /// Derive the payer-bound `(crank_pda, bump)` using `solana_pubkey::Pubkey`.
+    pub fn find_crank_pda(payer: &Pubkey, seed: &[u8; 32]) -> (Pubkey, u8) {
+        let (addr, bump) = crate::state::find_crank_pda(payer.as_array(), seed);
+        (Pubkey::new_from_array(addr.to_bytes()), bump)
+    }
+
+    /// Legacy unscoped derivation. Squattable by any payer.
+    // TODO: remove together with the legacy fallback in `Create`.
+    #[deprecated(note = "squattable; use the payer-bound `find_crank_pda`")]
+    pub fn find_crank_pda_unscoped(seed: &[u8; 32]) -> (Pubkey, u8) {
+        #[allow(deprecated)]
+        let (addr, bump) = crate::state::find_crank_pda_unscoped(seed);
         (Pubkey::new_from_array(addr.to_bytes()), bump)
     }
 
