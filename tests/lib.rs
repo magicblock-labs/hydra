@@ -56,8 +56,17 @@ pub fn load_noop(mollusk: &mut Mollusk) {
     mollusk.add_program(&NOOP_ID, NOOP_SO);
 }
 
+/// Legacy unscoped PDA — existing tests double as coverage of the
+/// deprecated `[b"crank", seed]` fallback in `Create`.
 pub fn find_crank(seed: &[u8; 32]) -> (Pubkey, u8) {
-    let (addr, bump) = hydra_api::state::find_crank_pda(seed);
+    #[allow(deprecated)]
+    let (addr, bump) = hydra_api::state::find_crank_pda_unscoped(seed);
+    (Pubkey::new_from_array(addr.to_bytes()), bump)
+}
+
+/// Payer-bound PDA (the current derivation).
+pub fn find_crank_for_payer(payer: &Pubkey, seed: &[u8; 32]) -> (Pubkey, u8) {
+    let (addr, bump) = hydra_api::state::find_crank_pda(&payer.to_bytes(), seed);
     (Pubkey::new_from_array(addr.to_bytes()), bump)
 }
 
@@ -616,6 +625,80 @@ mod tests {
         assert_eq!(header.executed(), 0);
         assert_eq!(header.region_len() as usize, region_len);
         assert!(header.rent_min() > 0, "rent_min should be cached");
+    }
+
+    #[test]
+    fn create_accepts_payer_bound_pda() {
+        let mollusk = mollusk_with_hydra();
+        let payer = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank_for_payer(&payer, &SEED);
+
+        let ix = create_ix(
+            payer,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            1_000,
+            0,
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+
+        let result = mollusk.process_transaction_instructions(&[ix], &accounts);
+        assert!(
+            result.raw_result.is_ok(),
+            "payer-bound create failed: {:?}",
+            result.raw_result
+        );
+    }
+
+    /// A squatter with a different payer derives a different PDA, so creating
+    /// at another payer's bound address must fail with `InvalidSeeds`.
+    #[test]
+    fn create_rejects_other_payers_bound_pda() {
+        let mollusk = mollusk_with_hydra();
+        let victim = Pubkey::new_unique();
+        let squatter = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank_for_payer(&victim, &SEED);
+
+        let ix = create_ix(
+            squatter,
+            crank_pda,
+            SEED,
+            [0u8; 32],
+            0,
+            100,
+            10,
+            1_000,
+            0,
+            memo::ID,
+            &[],
+            b"tick",
+        );
+
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let accounts = vec![
+            (squatter, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct),
+        ];
+
+        let result = mollusk.process_transaction_instructions(&[ix], &accounts);
+        assert!(
+            result.raw_result.is_err(),
+            "create must reject another payer's bound PDA"
+        );
     }
 
     /// A crank PDA that already holds lamports can't be created with a single

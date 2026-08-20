@@ -124,7 +124,7 @@ Examples:
 use hydra_api::instruction::{self as ix, CreateArgs, ScheduledIx};
 
 let seed = [0x42u8; 32];
-let (crank, _bump) = ix::find_crank_pda(&seed);
+let (crank, _bump) = ix::find_crank_pda(&payer_pubkey, &seed);
 
 let create = ix::create(
     payer_pubkey,
@@ -175,7 +175,8 @@ ix[k]   = your scheduled ix(instructions_sysvar, ...)   // crank PDA not an acco
 
 In the scheduled program, reject unless:
 
-- `expected_crank_pda == Pubkey::find_program_address([b"crank", seed], hydra_id)`
+- `expected_crank_pda == Pubkey::find_program_address([b"crank", payer, seed], hydra_id)`
+  (payer-bound; the legacy `[b"crank", seed]` derivation is deprecated)
 - the previous ix program id is `hydra_id`
 - the previous ix discriminator is `Trigger`
 - the previous ix first account is the same crank PDA

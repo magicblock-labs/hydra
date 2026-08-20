@@ -6,7 +6,7 @@
 //!
 //! Account order:
 //!   0: payer            (writable, signer)
-//!   1: crank            (writable) — PDA at `[b"crank", seed]` in hydra-api
+//!   1: crank            (writable) — PDA at `[b"crank", payer, seed]` in hydra-api
 //!   2: system_program
 //!   3: hydra program    (implicit: pulled from hydra_api::ID inside the CPI)
 //!

@@ -32,7 +32,8 @@ pub struct Crank {
     /// All-zeros = no cancel authority (crank is fire-and-forget until it
     /// exhausts naturally or `Close` recovers rent permissionlessly).
     pub authority: [u8; 32],
-    /// The 32-byte seed bytes that derived this PDA (`[b"crank", seed]`).
+    /// The 32-byte seed bytes that derived this PDA
+    /// (`[b"crank", payer, seed]`, or legacy `[b"crank", seed]`).
     pub seed: [u8; 32],
     pub next_exec_slot: [u8; 8],
     pub interval_slots: [u8; 8],
@@ -182,9 +183,20 @@ pub unsafe fn load_crank_mut(bytes: &mut [u8]) -> Result<&mut Crank, ProgramErro
     Ok(&mut *(bytes.as_mut_ptr() as *mut Crank))
 }
 
-/// Derive the crank PDA for the given 32-byte seed.
+/// Derive the payer-bound crank PDA: `[b"crank", payer, seed]`.
 #[inline]
-pub fn find_crank_pda(seed: &[u8; 32]) -> (solana_address::Address, u8) {
+pub fn find_crank_pda(payer: &[u8; 32], seed: &[u8; 32]) -> (solana_address::Address, u8) {
+    solana_address::Address::find_program_address(
+        &[crate::consts::CRANK_SEED_PREFIX, payer.as_ref(), seed.as_ref()],
+        &crate::ID,
+    )
+}
+
+/// Legacy unscoped derivation: `[b"crank", seed]`. Squattable by any payer.
+// TODO: remove together with the legacy fallback in `Create`.
+#[deprecated(note = "squattable; use the payer-bound `find_crank_pda`")]
+#[inline]
+pub fn find_crank_pda_unscoped(seed: &[u8; 32]) -> (solana_address::Address, u8) {
     solana_address::Address::find_program_address(
         &[crate::consts::CRANK_SEED_PREFIX, seed.as_ref()],
         &crate::ID,
