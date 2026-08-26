@@ -44,12 +44,19 @@ help: ## Show this help
 # ---------------------------------------------------------------------------
 # Build — on-chain SBF programs (artifacts land in target/deploy/*.so).
 # ---------------------------------------------------------------------------
-.PHONY: build build-examples build-anchor
+.PHONY: build build-cranker build-examples build-anchor
 
 build: ## build-sbf the noop + hydra programs
 	cargo build-sbf --manifest-path $(NOOP_MANIFEST)
 	cargo build-sbf --manifest-path $(BASE_MANIFEST)
 	cargo build-sbf --manifest-path $(EPHEMERAL_MANIFEST)
+
+# `[profile.release] lto = "thin"` is for the SBF programs. On a host build it
+# makes rustc embed LLVM bitcode into the rlibs, which Apple's linker (an older
+# libLTO than rustc's LLVM) can't parse — the macOS link then fails. LTO buys
+# the cranker nothing, so build it without. Mirrors the publish workflow.
+build-cranker: ## Build the release hydra-cranker binary (target/release/hydra-cranker)
+	CARGO_PROFILE_RELEASE_LTO=false cargo build -p hydra-cranker --release
 
 build-examples: ## build-sbf the native + pinocchio example programs
 	cargo build-sbf --manifest-path $(NATIVE_MANIFEST)
