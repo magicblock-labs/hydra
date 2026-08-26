@@ -187,7 +187,11 @@ pub unsafe fn load_crank_mut(bytes: &mut [u8]) -> Result<&mut Crank, ProgramErro
 #[inline]
 pub fn find_crank_pda(payer: &[u8; 32], seed: &[u8; 32]) -> (solana_address::Address, u8) {
     solana_address::Address::find_program_address(
-        &[crate::consts::CRANK_SEED_PREFIX, payer.as_ref(), seed.as_ref()],
+        &[
+            crate::consts::CRANK_SEED_PREFIX,
+            payer.as_ref(),
+            seed.as_ref(),
+        ],
         &crate::ID,
     )
 }
