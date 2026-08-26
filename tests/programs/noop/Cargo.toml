@@ -15,6 +15,7 @@ custom-heap = []
 
 [dependencies]
 pinocchio = { workspace = true }
+pinocchio-log = { workspace = true }
 
 [package.metadata.solana]
 program-id = "4sdZFwGE7TkQCJVpfggvfy2ZwGNCfF6hAMJYjZU5HpZG"
