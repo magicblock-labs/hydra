@@ -13,7 +13,7 @@ name = "compute_units"
 harness = false
 
 [dependencies]
-hydra-api = { workspace = true, features = ["client"] }
+hydra-api = { workspace = true, features = ["client", "ephemeral"] }
 # Tests reference hydra purely as a pre-built .so — load it via mollusk.
 # No `hydra` dependency here because we don't link on-chain code into tests.
 mollusk-svm = { workspace = true }
@@ -26,3 +26,4 @@ solana-system-interface = { workspace = true }
 
 [dev-dependencies]
 solana-logger = { workspace = true }
+ephemeral-rollups-pinocchio = { workspace = true }

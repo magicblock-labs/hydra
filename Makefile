@@ -17,12 +17,14 @@ SHELL := /bin/bash
 
 # Manifests for the crates that live outside the default workspace build.
 BASE_MANIFEST     := programs/hydra/Cargo.toml
+EPHEMERAL_MANIFEST := programs/hydra-ephemeral/Cargo.toml
 NOOP_MANIFEST      := tests/programs/noop/Cargo.toml
 NATIVE_MANIFEST    := examples/native/Cargo.toml
 PINOCCHIO_MANIFEST := examples/pinocchio/Cargo.toml
 ANCHOR_MANIFEST    := examples/anchor/Cargo.toml
 
 HYDRA_FEATURES := logging,cu-trace
+EPHEMERAL_FEATURES := logging
 
 CLIPPY := --all-targets -- -D warnings
 
@@ -42,6 +44,7 @@ help: ## Show this help
 build: ## build-sbf the noop + hydra programs
 	cargo build-sbf --manifest-path $(NOOP_MANIFEST)
 	cargo build-sbf --manifest-path $(BASE_MANIFEST)
+	cargo build-sbf --manifest-path $(EPHEMERAL_MANIFEST)
 
 build-examples: ## build-sbf the native + pinocchio example programs
 	cargo build-sbf --manifest-path $(NATIVE_MANIFEST)
@@ -66,9 +69,10 @@ fmt-check: ## Check formatting without writing (CI)
 	cargo fmt --all --check
 	cargo fmt --manifest-path $(ANCHOR_MANIFEST) --all --check
 
-lint: ## Clippy the workspace, hydra's optional features, and the anchor example
+lint: ## Clippy the workspace, both programs' optional features, and the anchor example
 	cargo clippy --workspace $(CLIPPY)
 	cargo clippy -p hydra --features $(HYDRA_FEATURES) $(CLIPPY)
+	cargo clippy -p hydra-ephemeral --features $(EPHEMERAL_FEATURES) $(CLIPPY)
 	cargo clippy --manifest-path $(ANCHOR_MANIFEST) $(CLIPPY)
 
 # ---------------------------------------------------------------------------

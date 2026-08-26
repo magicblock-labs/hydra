@@ -1,0 +1,33 @@
+[package]
+name = "hydra-ephemeral"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hydra — permissionless crank for MagicBlock ephemeral rollups"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Gates all `pinocchio_log::log!` invocations at compile time so release
+# builds emit no log strings.
+logging = []
+# Skip the on-chain entrypoint when this crate is consumed as a library
+# (e.g. by integration tests that already loaded the .so separately).
+no-entrypoint = []
+
+[dependencies]
+pinocchio = { workspace = true }
+pinocchio-log = { workspace = true }
+# CPI helpers for MagicBlock ephemeral accounts — the funding model that
+# distinguishes this program from the base-layer `hydra` crate.
+ephemeral-rollups-pinocchio = { workspace = true }
+solana-define-syscall = { workspace = true }
+hydra-api = { workspace = true, features = ["program"] }
+
+[package.metadata.solana]
+program-id = "eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf"
+
+[lints]
+workspace = true

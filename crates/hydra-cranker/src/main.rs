@@ -172,7 +172,7 @@ fn main() -> Result<()> {
     log::info!("rpc = {}", args.rpc_url);
     log::info!("ws  = {}", ws_url);
 
-    let program_id = ix::program_id();
+    let program_id = ix::base::PROGRAM_ID;
     let cache = new_cache();
     let shutdown = Arc::new(AtomicBool::new(false));
     // `at_slot` anchors each counter to an observed `next_exec_slot`: once
