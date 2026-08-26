@@ -76,7 +76,8 @@ pub fn spawn_program_watcher(
         while !shutdown.load(Ordering::Relaxed) {
             // Rebuild the RPC handle each attempt in case the previous one
             // is wedged.
-            let rpc = RpcClient::new(rpc_url.clone());
+            let rpc =
+                RpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::processed());
             if let Err(e) = bootstrap(&rpc, &program_id, &cache) {
                 log::warn!("bootstrap failed: {:#}; retrying in 5s", e);
                 thread::sleep(Duration::from_secs(5));
@@ -205,10 +206,10 @@ pub fn spawn_slot_watcher(
     })
 }
 
-/// A healthy cluster emits a slot roughly every 400 ms. If the subscription
-/// stays silent this long, the connection died without a close frame and the
-/// channel will never report `Disconnected`; bail so the reconnect loop can
-/// rebuild it.
+/// A healthy cluster emits a slot roughly every 400 ms (~50 ms on an ephemeral
+/// rollup). If the subscription stays silent this long, the connection died
+/// without a close frame and the channel will never report `Disconnected`; bail
+/// so the reconnect loop can rebuild it.
 const SLOT_SILENCE_LIMIT: Duration = Duration::from_secs(30);
 
 /// A degraded connection can also keep delivering *stale* slots at a trickle,
@@ -216,7 +217,7 @@ const SLOT_SILENCE_LIMIT: Duration = Duration::from_secs(30);
 /// the chain — and cranks whose `start_slot` is past the stream's horizon
 /// never become eligible. Cross-check against an HTTP `getSlot` this often
 /// and bail once the stream lags by more than [`MAX_SLOT_LAG`] (~1 min of
-/// chain time).
+/// base-layer chain time, ~7 s of rollup time).
 const LAG_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_SLOT_LAG: u64 = 150;
 const LAG_CHECK_RPC_TIMEOUT: Duration = Duration::from_secs(5);

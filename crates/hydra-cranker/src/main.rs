@@ -17,19 +17,37 @@ use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_keypair::{read_keypair, read_keypair_file, Keypair};
 use solana_pubkey::Pubkey;
+use solana_rpc_client_api::client_error::{Error as ClientError, TransactionError};
 use solana_signer::Signer;
 
 /// Consecutive failures at the same `next_exec_slot` before a crank is parked.
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
-/// Slots to skip a crank after a successful submit. Absorbs the in-flight
-/// window where both our cache and the RPC's preflight bank are stale; without
-/// it, a second fire within the window lands as `NotYetExecutable` (0x1).
-const POST_SUBMIT_COOLDOWN_SLOTS: u64 = 3;
+/// Backstop floor between fires of the same crank, on top of the optimistic
+/// `next_exec_slot` advance done on every successful submit (see
+/// `cache::advance_after_trigger`). That advance is what normally gates re-fire
+/// to the crank's own `interval_slots`; this only matters when it can't move the
+/// schedule — `interval_slots == 0` ("every slot") cranks — where it caps the
+/// blind retry rate at one fire per slot until the `programSubscribe` echo lands.
+const POST_SUBMIT_COOLDOWN_SLOTS: u64 = 1;
 
 /// Slots between Close attempts on the same crank. Close is one-shot: success
 /// purges the crank from the cache, so this map only tracks race losers.
 const CLOSE_RETRY_COOLDOWN_SLOTS: u64 = 10;
+
+/// How long an optimistically advanced `next_exec_slot` (see
+/// `cache::advance_after_trigger`) may go unconfirmed before it is undone. An
+/// accepted submit is not a landed transaction, and a dropped one produces no
+/// account change and therefore no `programSubscribe` echo to correct the
+/// cache — so without a bound the crank sits out a full interval on a fire that
+/// never happened. ~12 s of base-layer chain time, ~1.5 s on a rollup, both far
+/// above `processed`-commitment echo latency.
+const OPTIMISTIC_REARM_SLOTS: u64 = 30;
+
+/// Slots between delegation re-checks prompted by a rejected fee payer. The
+/// check is an RPC round-trip and the repair a base-layer transaction, so it
+/// must not run once per failing crank per slot.
+const DELEGATION_RECHECK_COOLDOWN_SLOTS: u64 = 50;
 
 struct FailureState {
     count: u32,
@@ -48,13 +66,14 @@ fn retry_backoff_slots(count: u32) -> u64 {
 }
 
 mod cache;
+mod delegation;
 mod fire;
 mod grpc;
 mod metrics;
+mod mode;
 mod watch;
 
 use cache::new_cache;
-use hydra_api::instruction as ix;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -109,6 +128,12 @@ struct Cli {
         default_value_t = false
     )]
     trigger_skip_preflight: bool,
+    /// Target Hydra's ephemeral-rollup program instead of the base-layer one.
+    /// Switches the watched program ID, the `Close` account layout, and the
+    /// funding/eligibility model (ephemeral cranks hold zero lamports). Point
+    /// `--rpc-url` at a MagicBlock ephemeral validator.
+    #[arg(long, env = "HYDRA_CRANKER_EPHEMERAL", default_value_t = false)]
+    ephemeral: bool,
     /// Run *every* eligible crank, including ones whose scheduled instructions
     /// reference the cranker's own pubkey. Such cranks can't actually fire — as
     /// the fee payer the cranker is promoted to signer + writable, so the
@@ -117,6 +142,24 @@ struct Cli {
     /// are skipped by default; this flag opts back in.
     #[arg(long = "unsafe", env = "HYDRA_CRANKER_UNSAFE", default_value_t = false)]
     run_unsafe: bool,
+    /// Base-layer (L1) JSON-RPC endpoint. Required with `--ephemeral`: the
+    /// cranker keypair must be delegated for the rollup to let its balance
+    /// change as the trigger fee payer, and delegating is a base-layer
+    /// transaction. The cranker delegates itself here at startup if needed,
+    /// paying for it out of its own balance. Unused in base mode.
+    #[arg(long, env = "HYDRA_CRANKER_BASE_RPC_URL")]
+    base_rpc_url: Option<String>,
+    /// How long to wait, with `--ephemeral`, for the rollup to report the
+    /// cranker keypair as delegated before giving up and exiting. The cranker
+    /// polls `getDelegationStatus` for this long, covering the lag between the
+    /// base-layer delegation landing and the rollup cloning the account.
+    /// `0` checks exactly once.
+    #[arg(
+        long,
+        env = "HYDRA_CRANKER_DELEGATION_TIMEOUT_SECS",
+        default_value_t = 30
+    )]
+    delegation_timeout_secs: u64,
 }
 
 fn default_ws_url(rpc_url: &str) -> String {
@@ -149,15 +192,58 @@ fn load_keypair(input: &str) -> Result<Keypair> {
     ))
 }
 
+/// Whether a trigger failure is the rollup refusing the cranker as fee payer —
+/// in ephemeral mode, the signature of a delegation that is no longer there.
+///
+/// Preflight and send failures carry the `TransactionError` structurally. The
+/// `--trigger-skip-preflight` path only gets the confirmed status formatted into
+/// a message, so that one is matched as text.
+fn is_invalid_fee_payer(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        e.downcast_ref::<ClientError>()
+            .and_then(ClientError::get_transaction_error)
+            .is_some_and(|te| matches!(te, TransactionError::InvalidAccountForFee))
+    }) || format!("{err:#}").contains("InvalidAccountForFee")
+}
+
+/// Re-establish the cranker's delegation after the rollup rejected it as fee
+/// payer, unless the rollup still considers it delegated (in which case the
+/// failure was something else and there is nothing to repair).
+///
+/// Returns whether this call performed the delegation, so the caller can adopt
+/// it for the shutdown undelegate.
+fn recover_delegation(
+    base: &RpcClient,
+    er: &RpcClient,
+    cranker: &Keypair,
+    timeout: Duration,
+) -> Result<bool> {
+    if delegation::is_delegated(er, &cranker.pubkey())? {
+        return Ok(false);
+    }
+    log::warn!(
+        "cranker {} is no longer delegated; re-delegating",
+        cranker.pubkey()
+    );
+    let took = delegation::ensure_delegated(base, er, cranker)?;
+    delegation::wait_until_delegated(er, &cranker.pubkey(), timeout)?;
+    Ok(took)
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
     let args = Cli::parse();
+    mode::init(args.ephemeral);
     let cranker = load_keypair(&args.keypair)?;
     let cranker_pubkey = cranker.pubkey();
     log::info!("cranker pubkey = {}", cranker_pubkey);
+    log::info!(
+        "mode = {}",
+        if args.ephemeral { "ephemeral" } else { "base" }
+    );
     if args.run_unsafe {
         log::warn!("--unsafe: running cranks that reference the cranker's own pubkey");
     }
@@ -172,7 +258,7 @@ fn main() -> Result<()> {
     log::info!("rpc = {}", args.rpc_url);
     log::info!("ws  = {}", ws_url);
 
-    let program_id = ix::base::PROGRAM_ID;
+    let program_id = mode::program_id();
     let cache = new_cache();
     let shutdown = Arc::new(AtomicBool::new(false));
     // `at_slot` anchors each counter to an observed `next_exec_slot`: once
@@ -182,10 +268,55 @@ fn main() -> Result<()> {
     let mut last_submit: HashMap<Pubkey, u64> = HashMap::new();
     let mut last_close_attempt: HashMap<Pubkey, u64> = HashMap::new();
     let mut last_trigger_attempt_slot: Option<u64> = None;
+    let mut last_delegation_recheck: Option<u64> = None;
 
     // Prometheus metrics endpoint (optional).
     if let Some(port) = args.prometheus_port {
         let _server = metrics::spawn_server(port);
+    }
+
+    // Ephemeral mode requires a delegated cranker: the rollup rejects a fee
+    // payer whose lamports change unless it is delegated, and every `Trigger`
+    // credits the cranker its reward. Fail fast here rather than let the
+    // trigger loop park every crank on `InvalidAccountForFee`. Base mode moves
+    // no fee-payer lamports this way and needs none of it.
+    // Throwaway signer for the shutdown undelegate. It is never a fee payer and
+    // never debited, so it needs no lamports and need not exist on-chain — its
+    // only job is to be an *undelegated* instruction payer, which is what keeps
+    // the magic program off its fee path. See `delegation::undelegate`.
+    let undelegate_payer = Keypair::new();
+    // Whether *this process* took the delegation, which is what entitles it to
+    // release it on the way out. A pre-existing delegation belongs to whoever
+    // made it — an operator, a sponsor tool, or a second cranker on the same
+    // key — and tearing it down here would strand them on
+    // `InvalidAccountForFee`.
+    let mut delegated_by_us = false;
+
+    let delegation_timeout = Duration::from_secs(args.delegation_timeout_secs);
+    // Kept for the whole run, not just startup: the trigger loop re-delegates
+    // through it when the rollup starts refusing the cranker as fee payer.
+    let base_rpc = if mode::is_ephemeral() {
+        let url = args.base_rpc_url.clone().ok_or_else(|| {
+            anyhow!("--base-rpc-url is required with --ephemeral (delegating the cranker keypair is a base-layer transaction)")
+        })?;
+        log::info!("base rpc = {}", url);
+        Some(RpcClient::new_with_commitment(
+            url,
+            CommitmentConfig::confirmed(),
+        ))
+    } else {
+        if args.base_rpc_url.is_some() {
+            log::warn!("--base-rpc-url is ignored without --ephemeral");
+        }
+        None
+    };
+
+    if let Some(base) = &base_rpc {
+        log::info!("undelegate payer = {}", undelegate_payer.pubkey());
+        delegated_by_us = delegation::ensure_delegated(base, &rpc, &cranker)?;
+        // Landing on the base layer is not the same as the rollup having seen
+        // it; the trigger loop needs the rollup's view.
+        delegation::wait_until_delegated(&rpc, &cranker_pubkey, delegation_timeout)?;
     }
 
     // Initial bootstrap so the trigger loop has something to scan even if
@@ -261,6 +392,17 @@ fn main() -> Result<()> {
         // Time the full sweep (scan + fire). `observe_duration` on drop.
         let _sweep = metrics::metrics().sweep_duration_seconds.start_timer();
 
+        // Before scanning: put back any crank whose submit was accepted but
+        // whose advance the chain never confirmed.
+        for pk in cache::rearm_unconfirmed(&cache, slot, OPTIMISTIC_REARM_SLOTS) {
+            log::warn!(
+                "slot {}: re-arming {} — no on-chain update confirmed its trigger within {} slots",
+                slot,
+                pk,
+                OPTIMISTIC_REARM_SLOTS
+            );
+        }
+
         // Close takes precedence: its staleness arm can overlap
         // `is_eligible`, and a stuck crank should be cleaned up rather than
         // re-fired.
@@ -270,7 +412,9 @@ fn main() -> Result<()> {
             let mut elig = Vec::new();
             let mut clos = Vec::new();
             for entry in guard.values() {
-                if entry.is_closable(slot) {
+                let closable_by_us =
+                    !mode::is_ephemeral() || entry.close_reporter_allowed(&cranker_pubkey);
+                if entry.is_closable(slot) && closable_by_us {
                     clos.push(entry.clone());
                 } else if entry.is_eligible(slot) {
                     // A crank that references the cranker's own pubkey can never
@@ -305,10 +449,12 @@ fn main() -> Result<()> {
                     continue;
                 }
             }
-            // Only skip when `at_slot` still matches: a fresh `next_exec_slot`
-            // means the crank advanced and the prior failure record is stale.
+            // Only skip when `at_slot` still matches: a fresh *confirmed*
+            // `next_exec_slot` means the crank really advanced and the prior
+            // failure record is stale. The optimistic advance is excluded on
+            // purpose — it is our own guess, not evidence of progress.
             if let Some(state) = failures.get(&entry.pubkey) {
-                if state.at_slot == entry.next_exec_slot {
+                if state.at_slot == entry.confirmed_next_exec_slot() {
                     if state.count >= MAX_CONSECUTIVE_FAILURES {
                         parked_now += 1;
                         continue;
@@ -331,32 +477,67 @@ fn main() -> Result<()> {
                 args.priority_fee_micro_lamports,
                 args.trigger_skip_preflight,
             ) {
-                Ok(()) => {
-                    log::info!("slot {}: triggered {}", slot, entry.pubkey);
+                Ok(signature) => {
+                    log::info!(
+                        "slot {}: triggered {} (tx {})",
+                        slot,
+                        entry.pubkey,
+                        signature
+                    );
                     metrics::metrics()
                         .triggers_submitted_total
                         .with_label_values(&["ok"])
                         .inc();
                     last_submit.insert(entry.pubkey, slot);
-                    // Failure record clears only when the cache observes an
-                    // advanced `next_exec_slot`; submit-Ok alone isn't proof
-                    // the tx landed.
+                    // Replay `Trigger`'s schedule advance in our cache now, so
+                    // the crank's next fire follows its `interval_slots` instead
+                    // of stalling until the `programSubscribe` echo catches up.
+                    cache::advance_after_trigger(&cache, entry.pubkey, entry.next_exec_slot, slot);
+                    // The failure record is deliberately left alone: it clears
+                    // only once the chain confirms an advanced `next_exec_slot`
+                    // (`CrankEntry::confirmed_next_exec_slot`), because the
+                    // advance just made above — like submit-Ok itself — is no
+                    // proof the tx landed.
                 }
-                Err(e) => {
-                    log::debug!("slot {}: trigger {} dropped: {:#}", slot, entry.pubkey, e);
+                Err(f) => {
+                    log::debug!("slot {}: trigger {} dropped: {:#}", slot, entry.pubkey, f);
                     metrics::metrics()
                         .triggers_submitted_total
                         .with_label_values(&["err"])
                         .inc();
+                    // A rejected fee payer means the delegation taken at startup
+                    // is gone — an undelegation that was still in flight when we
+                    // started, or one issued from elsewhere. Nothing else in the
+                    // loop would ever notice: every crank simply fails until it
+                    // parks. Repair it, throttled, and drop the failure records
+                    // it caused.
+                    if let Some(base) = &base_rpc {
+                        let due = last_delegation_recheck
+                            .is_none_or(|at| slot >= at + DELEGATION_RECHECK_COOLDOWN_SLOTS);
+                        if due && is_invalid_fee_payer(&f) {
+                            last_delegation_recheck = Some(slot);
+                            match recover_delegation(base, &rpc, &cranker, delegation_timeout) {
+                                Ok(true) => {
+                                    delegated_by_us = true;
+                                    failures.clear();
+                                }
+                                Ok(false) => {}
+                                Err(e) => log::warn!("re-delegating the cranker failed: {e:#}"),
+                            }
+                        }
+                    }
+                    // Anchored on the confirmed schedule, matching the staleness
+                    // test above.
+                    let at_slot = entry.confirmed_next_exec_slot();
                     let rec = failures.entry(entry.pubkey).or_insert(FailureState {
                         count: 0,
-                        at_slot: entry.next_exec_slot,
+                        at_slot,
                         next_retry_slot: 0,
                     });
-                    if rec.at_slot != entry.next_exec_slot {
+                    if rec.at_slot != at_slot {
                         *rec = FailureState {
                             count: 1,
-                            at_slot: entry.next_exec_slot,
+                            at_slot,
                             next_retry_slot: slot + retry_backoff_slots(1),
                         };
                     } else {
@@ -367,8 +548,8 @@ fn main() -> Result<()> {
                                 "parking crank {} after {} consecutive failures at slot {}: {:#}",
                                 entry.pubkey,
                                 rec.count,
-                                entry.next_exec_slot,
-                                e
+                                at_slot,
+                                f
                             );
                         }
                     }
@@ -392,15 +573,16 @@ fn main() -> Result<()> {
                 }
             }
             match fire::fire_close(&rpc, &cranker, &entry, args.priority_fee_micro_lamports) {
-                Ok(()) => {
-                    log::info!("slot {}: closed {}", slot, entry.pubkey);
+                Ok(signature) => {
+                    log::info!("slot {}: closed {} (tx {})", slot, entry.pubkey, signature);
                     metrics::metrics()
                         .closes_submitted_total
                         .with_label_values(&["ok"])
                         .inc();
+                    last_close_attempt.insert(entry.pubkey, slot);
                 }
-                Err(e) => {
-                    log::debug!("slot {}: close {} dropped: {:#}", slot, entry.pubkey, e);
+                Err(f) => {
+                    log::debug!("slot {}: close {} dropped: {:#}", slot, entry.pubkey, f);
                     metrics::metrics()
                         .closes_submitted_total
                         .with_label_values(&["err"])
@@ -412,5 +594,62 @@ fn main() -> Result<()> {
     }
 
     shutdown.store(true, Ordering::Relaxed);
+
+    // Release the delegation on the way out, committing the rewards earned on
+    // the rollup back to L1. Best-effort: triggering has already stopped, so a
+    // failure costs nothing this run, and the next startup finds the account
+    // still delegated and skips re-delegating.
+    //
+    // Only ours to release, though: a delegation that was already in place at
+    // startup is someone else's, and undelegating it would break whoever is
+    // relying on it.
+    if mode::is_ephemeral() {
+        if delegated_by_us {
+            if let Err(e) = delegation::undelegate(&rpc, &cranker, &undelegate_payer) {
+                log::warn!("undelegate on shutdown failed, cranker stays delegated: {e:#}");
+            }
+        } else {
+            log::info!(
+                "leaving cranker {cranker_pubkey} delegated: the delegation predates this process"
+            );
+        }
+    }
+
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use solana_rpc_client_api::client_error::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn a_structured_fee_payer_rejection_is_recognised() {
+        let err = anyhow::Error::new(ClientError::from(ErrorKind::TransactionError(
+            TransactionError::InvalidAccountForFee,
+        )))
+        .context("send_transaction");
+        assert!(is_invalid_fee_payer(&err));
+    }
+
+    #[test]
+    fn the_skip_preflight_confirmation_message_is_recognised() {
+        // `fire::confirm_or_fail` only has the `TransactionError`'s Debug form.
+        let err = anyhow!(
+            "tx 4NqB reverted on-chain: {:?}",
+            TransactionError::InvalidAccountForFee
+        );
+        assert!(is_invalid_fee_payer(&err));
+    }
+
+    #[test]
+    fn other_failures_do_not_trigger_a_re_delegation() {
+        let err = anyhow::Error::new(ClientError::from(ErrorKind::TransactionError(
+            TransactionError::BlockhashNotFound,
+        )))
+        .context("send_transaction");
+        assert!(!is_invalid_fee_payer(&err));
+        assert!(!is_invalid_fee_payer(&anyhow!("malformed crank tail")));
+    }
 }
