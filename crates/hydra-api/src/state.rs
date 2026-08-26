@@ -185,24 +185,51 @@ pub unsafe fn load_crank_mut(bytes: &mut [u8]) -> Result<&mut Crank, ProgramErro
 
 /// Derive the payer-bound crank PDA: `[b"crank", payer, seed]`.
 #[inline]
-pub fn find_crank_pda(payer: &[u8; 32], seed: &[u8; 32]) -> (solana_address::Address, u8) {
+pub fn find_base_crank_pda(payer: &[u8; 32], seed: &[u8; 32]) -> (solana_address::Address, u8) {
     solana_address::Address::find_program_address(
         &[
             crate::consts::CRANK_SEED_PREFIX,
             payer.as_ref(),
             seed.as_ref(),
         ],
-        &crate::ID,
+        &crate::base::ID,
     )
 }
 
 /// Legacy unscoped derivation: `[b"crank", seed]`. Squattable by any payer.
 // TODO: remove together with the legacy fallback in `Create`.
-#[deprecated(note = "squattable; use the payer-bound `find_crank_pda`")]
+#[deprecated(note = "squattable; use the payer-bound `find_base_crank_pda`")]
 #[inline]
-pub fn find_crank_pda_unscoped(seed: &[u8; 32]) -> (solana_address::Address, u8) {
+pub fn find_base_crank_pda_unscoped(seed: &[u8; 32]) -> (solana_address::Address, u8) {
     solana_address::Address::find_program_address(
         &[crate::consts::CRANK_SEED_PREFIX, seed.as_ref()],
-        &crate::ID,
+        &crate::base::ID,
+    )
+}
+
+/// Derive the payer-bound ephemeral crank PDA: `[b"crank", payer, seed]`.
+#[inline]
+pub fn find_ephemeral_base_crank_pda(
+    payer: &[u8; 32],
+    seed: &[u8; 32],
+) -> (solana_address::Address, u8) {
+    solana_address::Address::find_program_address(
+        &[
+            crate::consts::CRANK_SEED_PREFIX,
+            payer.as_ref(),
+            seed.as_ref(),
+        ],
+        &crate::ephemeral::ID,
+    )
+}
+
+/// Legacy unscoped derivation: `[b"crank", seed]`. Squattable by any payer.
+/// TODO: remove together with the legacy fallback in `Create`.
+#[deprecated(note = "squattable; use the payer-bound `find_ephemeral_base_crank_pda`")]
+#[inline]
+pub fn find_ephemeral_base_crank_pda_unscoped(seed: &[u8; 32]) -> (solana_address::Address, u8) {
+    solana_address::Address::find_program_address(
+        &[crate::consts::CRANK_SEED_PREFIX, seed.as_ref()],
+        &crate::ephemeral::ID,
     )
 }

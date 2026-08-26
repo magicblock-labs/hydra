@@ -62,12 +62,12 @@ mod client {
 
     /// Hydra program ID as a `solana_pubkey::Pubkey` (convenience for clients).
     pub fn program_id() -> Pubkey {
-        Pubkey::new_from_array(crate::ID.to_bytes())
+        Pubkey::new_from_array(crate::base::ID.to_bytes())
     }
 
     /// Derive the payer-bound `(crank_pda, bump)` using `solana_pubkey::Pubkey`.
     pub fn find_crank_pda(payer: &Pubkey, seed: &[u8; 32]) -> (Pubkey, u8) {
-        let (addr, bump) = crate::state::find_crank_pda(payer.as_array(), seed);
+        let (addr, bump) = crate::state::find_base_crank_pda(payer.as_array(), seed);
         (Pubkey::new_from_array(addr.to_bytes()), bump)
     }
 
@@ -76,7 +76,7 @@ mod client {
     #[deprecated(note = "squattable; use the payer-bound `find_crank_pda`")]
     pub fn find_crank_pda_unscoped(seed: &[u8; 32]) -> (Pubkey, u8) {
         #[allow(deprecated)]
-        let (addr, bump) = crate::state::find_crank_pda_unscoped(seed);
+        let (addr, bump) = crate::state::find_base_crank_pda_unscoped(seed);
         (Pubkey::new_from_array(addr.to_bytes()), bump)
     }
 

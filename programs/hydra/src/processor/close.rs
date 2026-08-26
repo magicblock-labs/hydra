@@ -1,13 +1,13 @@
 //! `Close` (disc 3) — permissionless cleanup of exhausted / underfunded /
 //! stuck cranks. A crank is "stuck" when `next_exec_slot` has fallen more
 //! than `STALENESS_THRESHOLD_SLOTS` behind the current slot, which means no
-//! cranker has successfully fired it in ~31 days — almost always because the
+//! cranker has successfully fired it in ~10 days — almost always because the
 //! inner ix deterministically fails.
 
 use pinocchio::{error::ProgramError, AccountView, ProgramResult};
 
 use hydra_api::{
-    consts::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
+    consts::base::{CRANKER_REWARD, STALENESS_THRESHOLD_SLOTS},
     state::load_crank,
     HydraError,
 };
@@ -22,7 +22,7 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
     if !reporter.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !crank_ai.owned_by(&hydra_api::ID) {
+    if !crank_ai.owned_by(&hydra_api::base::ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
 
