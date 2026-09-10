@@ -47,9 +47,7 @@ const multisigPda = new PublicKey(env("SQUADS_MULTISIG_PDA"));
 const vaultIndex = Number(env("SQUADS_VAULT_INDEX"));
 const programId = new PublicKey(env("PROGRAM_ID"));
 const bufferAddress = new PublicKey(env("PROGRAM_BUFFER_ADDRESS"));
-const spillAddress = process.env.SPILL_ADDRESS
-  ? new PublicKey(process.env.SPILL_ADDRESS)
-  : proposer.publicKey;
+const spillAddress = new PublicKey(env("SPILL_ADDRESS"));
 const programDataAddress = new PublicKey(env("PROGRAMDATA_ADDRESS"));
 const proposalName = env("PROPOSAL_NAME");
 
