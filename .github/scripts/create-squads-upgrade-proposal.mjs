@@ -41,13 +41,15 @@ async function confirmOrThrow(connection, signature, label) {
   }
 }
 
-const connection = new Connection(env("MAINNET_RPC_URL"), "confirmed");
+const connection = new Connection(env("RPC_URL"), "confirmed");
 const proposer = keypairFromFile(env("PROPOSER_KEYPAIR_PATH"));
 const multisigPda = new PublicKey(env("SQUADS_MULTISIG_PDA"));
 const vaultIndex = Number(env("SQUADS_VAULT_INDEX"));
 const programId = new PublicKey(env("PROGRAM_ID"));
 const bufferAddress = new PublicKey(env("PROGRAM_BUFFER_ADDRESS"));
-const spillAddress = new PublicKey(process.env.SPILL_ADDRESS);
+const spillAddress = process.env.SPILL_ADDRESS
+  ? new PublicKey(process.env.SPILL_ADDRESS)
+  : proposer.publicKey;
 const programDataAddress = new PublicKey(env("PROGRAMDATA_ADDRESS"));
 const proposalName = env("PROPOSAL_NAME");
 
@@ -150,11 +152,21 @@ const proposalSignature = await multisig.rpc.proposalCreate({
 });
 await confirmOrThrow(connection, proposalSignature, "proposalCreate");
 
+const [transactionPda] = multisig.getTransactionPda({
+  multisigPda,
+  index: transactionIndex,
+});
+
 fs.appendFileSync(
   env("GITHUB_ENV"),
-  `SQUADS_TRANSACTION_INDEX=${transactionIndex.toString()}\n`,
+  [
+    `SQUADS_TRANSACTION_INDEX=${transactionIndex.toString()}`,
+    `SQUADS_TRANSACTION_PDA=${transactionPda.toBase58()}`,
+    "",
+  ].join("\n"),
 );
 
 console.log(`Squads vault transaction signature: ${vaultTransactionSignature}`);
 console.log(`Squads proposal signature: ${proposalSignature}`);
 console.log(`Squads transaction index: ${transactionIndex.toString()}`);
+console.log(`Squads transaction PDA: ${transactionPda.toBase58()}`);
