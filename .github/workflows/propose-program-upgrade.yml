@@ -192,6 +192,8 @@ jobs:
           fi
           echo "PROGRAM_BUFFER_ADDRESS=$PROGRAM_BUFFER_ADDRESS" >> "$GITHUB_ENV"
 
+      # After this, only the Squads vault can close the buffer. If a later
+      # step fails, execute `solana program close <buffer>` through Squads.
       - name: Transfer buffer authority to Squads vault
         run: |
           solana program set-buffer-authority "$PROGRAM_BUFFER_ADDRESS" \
@@ -199,6 +201,12 @@ jobs:
             --keypair "$PROPOSER_KEYPAIR_PATH" \
             --buffer-authority "$PROPOSER_KEYPAIR_PATH" \
             --new-buffer-authority "$SQUADS_VAULT_PDA"
+          {
+            echo "### Buffer recovery"
+            echo
+            echo "- Buffer: \`$PROGRAM_BUFFER_ADDRESS\`"
+            echo "- If a later step fails, execute \`solana program close $PROGRAM_BUFFER_ADDRESS\` through Squads."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create Squads upgrade proposal
         env:
