@@ -15,6 +15,9 @@ import {
 const BPF_UPGRADEABLE_LOADER_ID = new PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
 );
+const MEMO_PROGRAM_ID = new PublicKey(
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+);
 const COMPUTE_BUDGET_PROGRAM_ID =
   "ComputeBudget111111111111111111111111111111";
 
@@ -121,10 +124,20 @@ const multisigInfo =
   );
 const transactionIndex = BigInt(Number(multisigInfo.transactionIndex) + 1);
 const blockhash = (await connection.getLatestBlockhash()).blockhash;
+// Title in the vault message (account-visible). `memo` below is indexer-only.
+const proposalMemoInstruction = new TransactionInstruction({
+  programId: MEMO_PROGRAM_ID,
+  keys: [],
+  data: Buffer.from(proposalName, "utf8"),
+});
 const transactionMessage = new TransactionMessage({
   payerKey: vaultPda,
   recentBlockhash: blockhash,
-  instructions: [upgradeInstruction, ...verifyInstructions],
+  instructions: [
+    proposalMemoInstruction,
+    upgradeInstruction,
+    ...verifyInstructions,
+  ],
 });
 
 // Squads wraps this message; the wrapped tx must still fit in a 1232-byte packet.
