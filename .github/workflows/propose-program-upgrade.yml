@@ -56,11 +56,11 @@ jobs:
       PROGRAM_LIB_NAME: ${{ matrix.lib }}
       PROGRAM_SO: target/deploy/${{ matrix.lib }}.so
       CLUSTER: ${{ matrix.cluster }}
-      RPC_URL: ${{ matrix.cluster == 'devnet' && secrets.DEVNET_RPC_URL || secrets.MAINNET_RPC_URL }}
-      SQUADS_PROPOSER_KEYPAIR: ${{ (matrix.cluster == 'devnet' && secrets.DEVNET_SQUADS_PROPOSER_KEYPAIR) || secrets.SQUADS_PROPOSER_KEYPAIR }}
+      RPC_URL: ${{ secrets[matrix.cluster == 'devnet' && 'DEVNET_RPC_URL' || 'MAINNET_RPC_URL'] }}
+      SQUADS_PROPOSER_KEYPAIR: ${{ secrets[matrix.cluster == 'devnet' && 'DEVNET_SQUADS_PROPOSER_KEYPAIR' || 'SQUADS_PROPOSER_KEYPAIR'] }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      SQUADS_MULTISIG_PDA: ${{ matrix.cluster == 'devnet' && vars.DEVNET_SQUADS_MULTISIG_PDA || vars.SQUADS_MULTISIG_PDA }}
-      SPILL_ADDRESS: ${{ matrix.cluster == 'devnet' && vars.DEVNET_SPILL_ADDRESS || vars.SPILL_ADDRESS }}
+      SQUADS_MULTISIG_PDA: ${{ vars[matrix.cluster == 'devnet' && 'DEVNET_SQUADS_MULTISIG_PDA' || 'SQUADS_MULTISIG_PDA'] }}
+      SPILL_ADDRESS: ${{ vars[matrix.cluster == 'devnet' && 'DEVNET_SPILL_ADDRESS' || 'SPILL_ADDRESS'] }}
 
     steps:
       # Pinned to actions/checkout v4.4.0
@@ -70,9 +70,15 @@ jobs:
 
       - name: Validate configuration
         run: |
-          : "${RPC_URL:?Set secrets.${CLUSTER^^}_RPC_URL}"
-          : "${SQUADS_PROPOSER_KEYPAIR:?Set the Squads proposer keypair secret}"
-          : "${SQUADS_MULTISIG_PDA:?Set the Squads multisig var}"
+          if [ "$CLUSTER" = devnet ]; then
+            : "${RPC_URL:?Set secrets.DEVNET_RPC_URL}"
+            : "${SQUADS_PROPOSER_KEYPAIR:?Set secrets.DEVNET_SQUADS_PROPOSER_KEYPAIR}"
+            : "${SQUADS_MULTISIG_PDA:?Set vars.DEVNET_SQUADS_MULTISIG_PDA}"
+          else
+            : "${RPC_URL:?Set secrets.MAINNET_RPC_URL}"
+            : "${SQUADS_PROPOSER_KEYPAIR:?Set secrets.SQUADS_PROPOSER_KEYPAIR}"
+            : "${SQUADS_MULTISIG_PDA:?Set vars.SQUADS_MULTISIG_PDA}"
+          fi
           : "${SLACK_WEBHOOK_URL:?Set secrets.SLACK_WEBHOOK_URL}"
           test -f Cargo.lock || {
             echo "Cargo.lock is required for solana-verify (deterministic builds / verify-from-repo)." >&2
