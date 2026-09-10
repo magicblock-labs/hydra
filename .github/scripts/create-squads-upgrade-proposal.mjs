@@ -32,8 +32,16 @@ function keypairFromFile(path) {
   );
 }
 
-async function confirmOrThrow(connection, signature, label) {
-  const result = await connection.confirmTransaction(signature, "confirmed");
+async function confirmOrThrow(
+  connection,
+  signature,
+  { blockhash, lastValidBlockHeight },
+  label,
+) {
+  const result = await connection.confirmTransaction(
+    { signature, blockhash, lastValidBlockHeight },
+    "confirmed",
+  );
   if (result.value.err) {
     throw new Error(
       `${label} failed on-chain (signature ${signature}): ${JSON.stringify(result.value.err)}`,
@@ -128,6 +136,7 @@ if (compiledSize > 1100) {
   );
 }
 
+const vaultTransactionBlockhash = await connection.getLatestBlockhash();
 const vaultTransactionSignature = await multisig.rpc.vaultTransactionCreate({
   connection,
   feePayer: proposer,
@@ -139,8 +148,14 @@ const vaultTransactionSignature = await multisig.rpc.vaultTransactionCreate({
   transactionMessage,
   memo: proposalName,
 });
-await confirmOrThrow(connection, vaultTransactionSignature, "vaultTransactionCreate");
+await confirmOrThrow(
+  connection,
+  vaultTransactionSignature,
+  vaultTransactionBlockhash,
+  "vaultTransactionCreate",
+);
 
+const proposalBlockhash = await connection.getLatestBlockhash();
 const proposalSignature = await multisig.rpc.proposalCreate({
   connection,
   feePayer: proposer,
@@ -148,7 +163,12 @@ const proposalSignature = await multisig.rpc.proposalCreate({
   transactionIndex,
   creator: proposer,
 });
-await confirmOrThrow(connection, proposalSignature, "proposalCreate");
+await confirmOrThrow(
+  connection,
+  proposalSignature,
+  proposalBlockhash,
+  "proposalCreate",
+);
 
 const [transactionPda] = multisig.getTransactionPda({
   multisigPda,
