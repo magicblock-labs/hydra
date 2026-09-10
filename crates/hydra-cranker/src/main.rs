@@ -377,6 +377,24 @@ fn main() -> Result<()> {
         .ok();
     }
 
+    // Measure slot duration from the live stream before firing.
+    let warmup_deadline = Instant::now() + Duration::from_secs(10);
+    while !mode::slot_duration_ready() && !shutdown.load(Ordering::Relaxed) {
+        if Instant::now() >= warmup_deadline {
+            log::warn!(
+                "slot timing warmup timed out; using {:?}",
+                mode::slot_duration()
+            );
+            break;
+        }
+        match slot_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(slot) => mode::observe_slot(slot, Instant::now()),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    log::info!("slot time = {:?}", mode::slot_duration());
+
     // Trigger loop. `recv_timeout` so we observe the shutdown flag within
     // 500 ms even if slotSubscribe has gone quiet (dropped WS, idle RPC).
     loop {
@@ -384,7 +402,11 @@ fn main() -> Result<()> {
             break;
         }
         let (slot, slot_observed_at) = match slot_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(slot) => (slot, Instant::now()),
+            Ok(slot) => {
+                let at = Instant::now();
+                mode::observe_slot(slot, at);
+                (slot, at)
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
