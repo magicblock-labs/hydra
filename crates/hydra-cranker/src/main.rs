@@ -325,7 +325,7 @@ fn main() -> Result<()> {
     metrics::metrics().cranks_cached.set(n as i64);
     log::info!("bootstrap: {} crank(s) cached", n);
 
-    let (slot_tx, slot_rx) = mpsc::channel::<u64>();
+    let (slot_tx, slot_rx) = mpsc::channel::<(u64, Instant)>();
     let _program_thread = watch::spawn_program_watcher(
         args.rpc_url.clone(),
         ws_url.clone(),
@@ -388,7 +388,7 @@ fn main() -> Result<()> {
             break;
         }
         match slot_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(slot) => mode::observe_slot(slot, Instant::now()),
+            Ok((slot, observed_at)) => mode::observe_slot(slot, observed_at),
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -402,10 +402,9 @@ fn main() -> Result<()> {
             break;
         }
         let (slot, slot_observed_at) = match slot_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(slot) => {
-                let at = Instant::now();
-                mode::observe_slot(slot, at);
-                (slot, at)
+            Ok((slot, observed_at)) => {
+                mode::observe_slot(slot, observed_at);
+                (slot, observed_at)
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
