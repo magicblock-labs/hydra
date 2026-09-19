@@ -291,9 +291,14 @@ mod client {
     /// ([`EPHEMERAL_PROGRAM_ID`]).
     #[cfg(feature = "ephemeral")]
     pub mod ephemeral {
-        use ephemeral_rollups_pinocchio::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID};
-
         use super::*;
+
+        /// The Magic program id, inlined rather than imported from
+        /// `ephemeral-rollups-pinocchio`, which depends on this crate.
+        pub const MAGIC_PROGRAM_ID: Pubkey = pubkey!("Magic11111111111111111111111111111111111111");
+        /// The ephemeral vault id (see `MAGIC_PROGRAM_ID`).
+        pub const EPHEMERAL_VAULT_ID: Pubkey =
+            pubkey!("MagicVau1t999999999999999999999999999999999");
 
         /// This module's program ID.
         pub const PROGRAM_ID: Pubkey = super::EPHEMERAL_PROGRAM_ID;

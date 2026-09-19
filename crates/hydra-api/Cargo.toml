@@ -29,10 +29,12 @@ cpi-pinocchio = ["pinocchio/cpi", "dep:solana-program-error"]
 # `programs/hydra` and `programs/hydra-ephemeral` program crates. Pulls in
 # `solana-define-syscall` for the raw Clock / stack-height reads.
 program = ["pinocchio/cpi", "dep:solana-define-syscall"]
-ephemeral = ["dep:ephemeral-rollups-pinocchio"]
+# Builders and CPI helpers for the ephemeral-rollup Hydra program. Carries no
+# extra dependency: `ephemeral-rollups-pinocchio` depends on this crate, so
+# depending back on it would make the published crates unresolvable.
+ephemeral = []
 
 [dependencies]
-ephemeral-rollups-pinocchio = { workspace = true, optional = true }
 pinocchio = { workspace = true }
 solana-address = { workspace = true }
 solana-define-syscall = { workspace = true, optional = true }
