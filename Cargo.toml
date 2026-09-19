@@ -19,7 +19,7 @@ members = [
 exclude = ["examples/anchor", "tests/e2e"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/magicblock-labs/hydra"
@@ -28,7 +28,10 @@ repository = "https://github.com/magicblock-labs/hydra"
 pinocchio = { version = "0.11", features = ["cpi"] }
 pinocchio-system = "0.6"
 pinocchio-log = "0.5"
-ephemeral-rollups-pinocchio = "0.17"
+# Exact pin: 0.17.1 depends on hydra-api 0.2.0, whose `ephemeral` feature
+# depended back on this crate, so `^0.17` cannot be resolved. Relax once the
+# SDK ships a release built against hydra-api 0.2.1.
+ephemeral-rollups-pinocchio = "=0.17.0"
 solana-address = { version = "2", features = ["decode", "curve25519"] }
 solana-define-syscall = "5.0"
 hydra-api = { path = "crates/hydra-api" }
