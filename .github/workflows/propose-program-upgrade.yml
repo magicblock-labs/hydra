@@ -1,0 +1,289 @@
+name: Propose Program Upgrade
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: propose-program-upgrade
+  cancel-in-progress: false
+
+env:
+  # Keep in sync with CI and `[workspace.metadata.cli] solana`.
+  SOLANA_VERSION: v4.0.1
+  SOLANA_VERIFY_VERSION: 0.4.15
+
+  SQUADS_VAULT_INDEX: "0"
+  SPILL_ADDRESS: ${{ vars.SPILL_ADDRESS }}
+
+  BUFFER_UPLOAD_COMPUTE_UNIT_PRICE: "50000"
+  MAX_SIGN_ATTEMPTS: "50"
+  PROPOSER_KEYPAIR_PATH: /tmp/squads-proposer.json
+
+jobs:
+  propose:
+    name: Propose ${{ matrix.name }} on ${{ matrix.cluster }}
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.cluster }}-program-upgrade
+    # One at a time: jobs that share a Squads multisig race on
+    # vaultTransactionCreate (`transactionIndex + 1`).
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: hydra
+            id: Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea
+            lib: hydra
+            cluster: mainnet
+          - name: hydra
+            id: Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea
+            lib: hydra
+            cluster: devnet
+          - name: hydra-ephemeral
+            id: eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf
+            lib: hydra_ephemeral
+            cluster: mainnet
+          - name: hydra-ephemeral
+            id: eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf
+            lib: hydra_ephemeral
+            cluster: devnet
+    env:
+      PROGRAM_ID: ${{ matrix.id }}
+      PROGRAM_LIB_NAME: ${{ matrix.lib }}
+      PROGRAM_SO: target/deploy/${{ matrix.lib }}.so
+      CLUSTER: ${{ matrix.cluster }}
+      RPC_URL: ${{ secrets[matrix.cluster == 'devnet' && 'DEVNET_RPC_URL' || 'MAINNET_RPC_URL'] }}
+      SQUADS_PROPOSER_KEYPAIR: ${{ secrets[matrix.cluster == 'devnet' && 'DEVNET_SQUADS_PROPOSER_KEYPAIR' || 'SQUADS_PROPOSER_KEYPAIR'] }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SQUADS_MULTISIG_PDA: ${{ vars[matrix.cluster == 'devnet' && 'DEVNET_SQUADS_MULTISIG_PDA' || 'SQUADS_MULTISIG_PDA'] }}
+      SPILL_ADDRESS: ${{ vars[matrix.cluster == 'devnet' && 'DEVNET_SPILL_ADDRESS' || 'SPILL_ADDRESS'] }}
+
+    steps:
+      # Pinned to actions/checkout v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate configuration
+        run: |
+          if [ "$CLUSTER" = devnet ]; then
+            : "${RPC_URL:?Set secrets.DEVNET_RPC_URL}"
+            : "${SQUADS_PROPOSER_KEYPAIR:?Set secrets.DEVNET_SQUADS_PROPOSER_KEYPAIR}"
+            : "${SQUADS_MULTISIG_PDA:?Set vars.DEVNET_SQUADS_MULTISIG_PDA}"
+          else
+            : "${RPC_URL:?Set secrets.MAINNET_RPC_URL}"
+            : "${SQUADS_PROPOSER_KEYPAIR:?Set secrets.SQUADS_PROPOSER_KEYPAIR}"
+            : "${SQUADS_MULTISIG_PDA:?Set vars.SQUADS_MULTISIG_PDA}"
+          fi
+          : "${SLACK_WEBHOOK_URL:?Set secrets.SLACK_WEBHOOK_URL}"
+          test -f Cargo.lock || {
+            echo "Cargo.lock is required for solana-verify (deterministic builds / verify-from-repo)." >&2
+            exit 1
+          }
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust
+        # Pinned to dtolnay/rust-toolchain stable @ 2026-03-27
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Cache Rust
+        # Pinned to Swatinem/rust-cache v2.9.1
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+
+      - name: Install solana-verify
+        run: |
+          BASE="https://github.com/solana-foundation/solana-verifiable-build/releases/download/v${SOLANA_VERIFY_VERSION}"
+          curl -sSfL "$BASE/solana-verify-${SOLANA_VERIFY_VERSION}-linux" -o /tmp/solana-verify
+          curl -sSfL "$BASE/solana-verify-${SOLANA_VERIFY_VERSION}-linux.sha256" -o /tmp/solana-verify.sha256
+          (cd /tmp && awk '{print $1"  solana-verify"}' solana-verify.sha256 | sha256sum -c -)
+          chmod +x /tmp/solana-verify
+          sudo mv /tmp/solana-verify /usr/local/bin/solana-verify
+          solana-verify --version
+
+      - name: Derive expected Squads vault
+        id: vault
+        run: |
+          # --ignore-scripts blocks dependency lifecycle hooks so a compromised package
+          # cannot run arbitrary code during install. Pure-JS deps don't need build steps.
+          npm install --no-save --no-package-lock --ignore-scripts @sqds/multisig@2.1.4 @solana/web3.js@1.98.4
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import * as multisig from "@sqds/multisig";
+          import { PublicKey } from "@solana/web3.js";
+
+          const [vaultPda] = multisig.getVaultPda({
+            multisigPda: new PublicKey(process.env.SQUADS_MULTISIG_PDA),
+            index: Number(process.env.SQUADS_VAULT_INDEX),
+          });
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `address=${vaultPda.toBase58()}\n`);
+          NODE
+
+      - name: Write proposer keypair
+        run: |
+          printf '%s' "$SQUADS_PROPOSER_KEYPAIR" > "$PROPOSER_KEYPAIR_PATH"
+          chmod 600 "$PROPOSER_KEYPAIR_PATH"
+          if [ -z "$SPILL_ADDRESS" ]; then
+            SPILL_ADDRESS=$(solana-keygen pubkey "$PROPOSER_KEYPAIR_PATH")
+          fi
+          echo "SPILL_ADDRESS=$SPILL_ADDRESS" >> "$GITHUB_ENV"
+
+      - name: Build verifiable program binary
+        run: |
+          solana-verify build --library-name "$PROGRAM_LIB_NAME" --base-image "solanafoundation/solana-verifiable-build:${SOLANA_VERSION#v}"
+          test -f "$PROGRAM_SO"
+          shasum -a 256 "$PROGRAM_SO" | tee "${PROGRAM_LIB_NAME}.so.sha256"
+          solana-verify get-executable-hash "$PROGRAM_SO" | tee "${PROGRAM_LIB_NAME}.so.executable-hash"
+
+      - name: Check upgrade authority and program size
+        env:
+          EXPECTED_SQUADS_VAULT_PDA: ${{ steps.vault.outputs.address }}
+        run: |
+          PROGRAM_INFO=$(solana program show "$PROGRAM_ID" --url "$RPC_URL" --keypair "$PROPOSER_KEYPAIR_PATH" --no-address-labels)
+          printf '%s\n' "$PROGRAM_INFO" | tee program-info.txt
+
+          CURRENT_AUTHORITY=$(printf '%s\n' "$PROGRAM_INFO" | awk -F': ' '/^Authority:/ {print $2; exit}')
+          PROGRAMDATA_ADDRESS=$(printf '%s\n' "$PROGRAM_INFO" | awk -F': ' '/^ProgramData Address:/ {print $2; exit}')
+          CURRENT_DATA_LEN=$(printf '%s\n' "$PROGRAM_INFO" | awk '/^Data Length:/ {print $3; exit}')
+          BINARY_SIZE=$(wc -c < "$PROGRAM_SO" | tr -d ' ')
+
+          if [ -z "$CURRENT_AUTHORITY" ] || [ -z "$PROGRAMDATA_ADDRESS" ] || [ -z "$CURRENT_DATA_LEN" ]; then
+            echo "Could not parse authority, ProgramData address, or allocation from solana program show output." >&2
+            exit 1
+          fi
+
+          if [ "$CURRENT_AUTHORITY" != "$EXPECTED_SQUADS_VAULT_PDA" ]; then
+            echo "Program upgrade authority is $CURRENT_AUTHORITY, expected Squads vault $EXPECTED_SQUADS_VAULT_PDA" >&2
+            exit 1
+          fi
+
+          if [ "$BINARY_SIZE" -gt "$CURRENT_DATA_LEN" ]; then
+            EXTRA_BYTES=$((BINARY_SIZE - CURRENT_DATA_LEN))
+            echo "Built binary is $BINARY_SIZE bytes, but current ProgramData allocation is $CURRENT_DATA_LEN bytes." >&2
+            echo "Create and execute a separate Squads proposal to extend the program by at least $EXTRA_BYTES bytes before proposing this upgrade." >&2
+            exit 1
+          fi
+
+          {
+            echo "SQUADS_VAULT_PDA=$CURRENT_AUTHORITY"
+            echo "PROGRAMDATA_ADDRESS=$PROGRAMDATA_ADDRESS"
+            echo "CURRENT_DATA_LEN=$CURRENT_DATA_LEN"
+            echo "BINARY_SIZE=$BINARY_SIZE"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload program buffer
+        run: |
+          solana program write-buffer "$PROGRAM_SO" \
+            --url "$RPC_URL" \
+            --keypair "$PROPOSER_KEYPAIR_PATH" \
+            --buffer-authority "$PROPOSER_KEYPAIR_PATH" \
+            --fee-payer "$PROPOSER_KEYPAIR_PATH" \
+            --use-rpc \
+            --with-compute-unit-price "$BUFFER_UPLOAD_COMPUTE_UNIT_PRICE" \
+            --max-sign-attempts "$MAX_SIGN_ATTEMPTS" \
+            | tee buffer.log
+
+          PROGRAM_BUFFER_ADDRESS=$(awk '/^Buffer:/ {print $2; exit}' buffer.log)
+          if [ -z "$PROGRAM_BUFFER_ADDRESS" ]; then
+            echo "Could not parse buffer address from solana program write-buffer output" >&2
+            exit 1
+          fi
+          echo "PROGRAM_BUFFER_ADDRESS=$PROGRAM_BUFFER_ADDRESS" >> "$GITHUB_ENV"
+
+      # After this, only the Squads vault can close the buffer. If a later
+      # step fails, execute `solana program close <buffer>` through Squads.
+      - name: Transfer buffer authority to Squads vault
+        run: |
+          solana program set-buffer-authority "$PROGRAM_BUFFER_ADDRESS" \
+            --url "$RPC_URL" \
+            --keypair "$PROPOSER_KEYPAIR_PATH" \
+            --buffer-authority "$PROPOSER_KEYPAIR_PATH" \
+            --new-buffer-authority "$SQUADS_VAULT_PDA"
+          {
+            echo "### Buffer recovery"
+            echo
+            echo "- Buffer: \`$PROGRAM_BUFFER_ADDRESS\`"
+            echo "- If a later step fails, execute \`solana program close $PROGRAM_BUFFER_ADDRESS\` through Squads."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create Squads upgrade proposal
+        env:
+          PROPOSAL_NAME: ${{ format('Upgrade hydra {0}', github.event.release.tag_name) }}
+          VERIFY_REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: node .github/scripts/create-squads-upgrade-proposal.mjs
+
+      - name: Build Slack message
+        id: slack
+        env:
+          PROPOSAL_NAME: ${{ format('Upgrade hydra {0}', github.event.release.tag_name) }}
+          PROGRAM_NAME: ${{ matrix.name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          SQUADS_URL="https://app.squads.so/squads/${SQUADS_VAULT_PDA}/transactions/${SQUADS_TRANSACTION_PDA}"
+          TEXT=$(printf '%s\n' \
+            "*${PROGRAM_NAME} ${CLUSTER} upgrade proposed to Squads*" \
+            "• Proposal: \`${PROPOSAL_NAME}\`" \
+            "• Program: \`${PROGRAM_ID}\`" \
+            "• Buffer: \`${PROGRAM_BUFFER_ADDRESS}\`" \
+            "• Squads: <${SQUADS_URL}|tx ${SQUADS_TRANSACTION_INDEX}>" \
+            "• Commit: \`${GITHUB_SHA}\`" \
+            "• Run: <${RUN_URL}|${GITHUB_REPOSITORY} #${GITHUB_RUN_ID}>")
+          {
+            echo "text<<EOF"
+            printf '%s\n' "$TEXT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        # Pinned to slackapi/slack-github-action v1.24.0
+        uses: slackapi/slack-github-action@e28cf165c92ffef168d23c5c9000cffc8a25e117
+        with:
+          payload: |
+            {
+              "text": ${{ toJson(steps.slack.outputs.text) }},
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ${{ toJson(steps.slack.outputs.text) }}
+                  }
+                }
+              ]
+            }
+
+      - name: Upload deployment artifacts
+        if: always()
+        # Pinned to actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: program-upgrade-${{ matrix.name }}-${{ matrix.cluster }}-${{ github.sha }}
+          path: |
+            ${{ matrix.lib }}.so.sha256
+            ${{ matrix.lib }}.so.executable-hash
+            program-info.txt
+            buffer.log
+          if-no-files-found: ignore
+
+      - name: Write summary
+        run: |
+          {
+            echo "### ${{ matrix.name }} ${{ matrix.cluster }} upgrade proposal"
+            echo
+            echo "- Program: \`$PROGRAM_ID\`"
+            echo "- Buffer: \`$PROGRAM_BUFFER_ADDRESS\`"
+            echo "- Squads multisig: \`$SQUADS_MULTISIG_PDA\`"
+            echo "- Squads vault: \`$SQUADS_VAULT_PDA\`"
+            echo "- Squads transaction: \`$SQUADS_TRANSACTION_INDEX\` (\`$SQUADS_TRANSACTION_PDA\`)"
+            echo "- ProgramData: \`$PROGRAMDATA_ADDRESS\`"
+            echo "- Binary size: \`$BINARY_SIZE\` bytes"
+            echo "- Current ProgramData allocation: \`$CURRENT_DATA_LEN\` bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
