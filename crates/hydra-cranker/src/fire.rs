@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use hydra_api::instruction as ix;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentLevel;
 use solana_instruction::Instruction;
@@ -15,17 +16,23 @@ use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-/// How long `fire_trigger` waits to observe a `skip_preflight` tx land before
-/// returning an error. ~30 slots at 400 ms gives the leader and a couple of
-/// forks room to commit; longer than this and the tx is almost certainly
-/// dropped, which we want to surface as a failure so backoff kicks in.
-const SKIP_PREFLIGHT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
-const SKIP_PREFLIGHT_POLL_INTERVAL: Duration = Duration::from_millis(400);
-
-use hydra_api::instruction as ix;
-
 use crate::cache::CrankEntry;
 use crate::metrics;
+
+/// How long `fire_trigger` waits to observe a `skip_preflight` tx land before
+/// returning an error, in slots. Gives the leader and a couple of forks room
+/// to commit; longer than this and the tx is almost certainly dropped, which
+/// we want to surface as a failure so backoff kicks in. Scaled by the
+/// measured slot duration (see [`crate::mode::slot_duration`]).
+const SKIP_PREFLIGHT_CONFIRM_SLOTS: u32 = 30;
+
+fn skip_preflight_poll_interval() -> Duration {
+    crate::mode::slot_duration()
+}
+
+fn skip_preflight_confirm_timeout() -> Duration {
+    crate::mode::slot_duration().saturating_mul(SKIP_PREFLIGHT_CONFIRM_SLOTS)
+}
 
 const COMPUTE_BUDGET_ID: Pubkey = pubkey!("ComputeBudget111111111111111111111111111111");
 
@@ -128,7 +135,8 @@ pub fn fire_trigger(
 /// — better to back off and retry next slot than to retransmit a doomed
 /// crank every cooldown.
 fn confirm_or_fail(rpc: &RpcClient, signature: &Signature) -> Result<()> {
-    let deadline = Instant::now() + SKIP_PREFLIGHT_CONFIRM_TIMEOUT;
+    let timeout = skip_preflight_confirm_timeout();
+    let deadline = Instant::now() + timeout;
     loop {
         match rpc.get_signature_status(signature) {
             Ok(Some(Ok(()))) => return Ok(()),
@@ -141,12 +149,9 @@ fn confirm_or_fail(rpc: &RpcClient, signature: &Signature) -> Result<()> {
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    return Err(anyhow!(
-                        "tx {signature} not observed within {:?}",
-                        SKIP_PREFLIGHT_CONFIRM_TIMEOUT
-                    ));
+                    return Err(anyhow!("tx {signature} not observed within {timeout:?}"));
                 }
-                thread::sleep(SKIP_PREFLIGHT_POLL_INTERVAL);
+                thread::sleep(skip_preflight_poll_interval());
             }
             Err(e) => {
                 metrics::metrics()

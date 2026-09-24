@@ -325,7 +325,7 @@ fn main() -> Result<()> {
     metrics::metrics().cranks_cached.set(n as i64);
     log::info!("bootstrap: {} crank(s) cached", n);
 
-    let (slot_tx, slot_rx) = mpsc::channel::<u64>();
+    let (slot_tx, slot_rx) = mpsc::channel::<(u64, Instant)>();
     let _program_thread = watch::spawn_program_watcher(
         args.rpc_url.clone(),
         ws_url.clone(),
@@ -377,6 +377,24 @@ fn main() -> Result<()> {
         .ok();
     }
 
+    // Measure slot duration from the live stream before firing.
+    let warmup_deadline = Instant::now() + Duration::from_secs(10);
+    while !mode::slot_duration_ready() && !shutdown.load(Ordering::Relaxed) {
+        if Instant::now() >= warmup_deadline {
+            log::warn!(
+                "slot timing warmup timed out; using {:?}",
+                mode::slot_duration()
+            );
+            break;
+        }
+        match slot_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok((slot, observed_at)) => mode::observe_slot(slot, observed_at),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    log::info!("slot time = {:?}", mode::slot_duration());
+
     // Trigger loop. `recv_timeout` so we observe the shutdown flag within
     // 500 ms even if slotSubscribe has gone quiet (dropped WS, idle RPC).
     loop {
@@ -384,7 +402,10 @@ fn main() -> Result<()> {
             break;
         }
         let (slot, slot_observed_at) = match slot_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(slot) => (slot, Instant::now()),
+            Ok((slot, observed_at)) => {
+                mode::observe_slot(slot, observed_at);
+                (slot, observed_at)
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };

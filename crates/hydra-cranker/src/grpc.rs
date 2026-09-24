@@ -2,7 +2,7 @@
 //!
 //! Runs alongside the WS subscriptions in [`crate::watch`] (not in place of
 //! them): account updates flow into the same [`Cache`] and slot updates into
-//! the same `mpsc::Sender<u64>`. Whichever transport delivers first wins;
+//! the same `mpsc::Sender<(u64, Instant)>`. Whichever transport delivers first wins;
 //! the other becomes a redundant backstop. If `--grpc-url` is set the user
 //! is opting in to that redundancy/lower latency.
 //!
@@ -16,7 +16,7 @@ use std::{
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -42,7 +42,7 @@ pub fn spawn_grpc_watcher(
     program_id: Pubkey,
     cache: Cache,
     shutdown: Arc<AtomicBool>,
-    tick: mpsc::Sender<u64>,
+    tick: mpsc::Sender<(u64, Instant)>,
 ) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("hydra-grpc".to_string())
@@ -70,7 +70,7 @@ async fn grpc_main(
     program_id: Pubkey,
     cache: Cache,
     shutdown: Arc<AtomicBool>,
-    tick: mpsc::Sender<u64>,
+    tick: mpsc::Sender<(u64, Instant)>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         // Bump on every (re)connect attempt so the metric counts attempts,
@@ -117,7 +117,7 @@ async fn run_once(
     program_id: &Pubkey,
     cache: &Cache,
     shutdown: &AtomicBool,
-    tick: &mpsc::Sender<u64>,
+    tick: &mpsc::Sender<(u64, Instant)>,
 ) -> Result<()> {
     let mut builder = GeyserGrpcClient::build_from_shared(endpoint.to_string())
         .context("grpc: invalid endpoint")?;
@@ -189,7 +189,7 @@ async fn run_once(
             }
             Some(UpdateOneof::Slot(slot)) => {
                 metrics::metrics().current_slot.set(slot.slot as i64);
-                if tick.send(slot.slot).is_err() {
+                if tick.send((slot.slot, Instant::now())).is_err() {
                     return Ok(());
                 }
             }
