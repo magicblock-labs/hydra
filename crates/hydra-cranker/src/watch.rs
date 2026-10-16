@@ -7,7 +7,7 @@
 //!   each notification, and upserts or removes the matching cache entry
 //!   (removed when the account was closed and its data is gone).
 //! * **slot watcher** — subscribes to `slotSubscribe` and forwards the current
-//!   slot number into an `mpsc::Sender<u64>` that the main thread reads.
+//!   slot number into an `mpsc::Sender<(u64, Instant)>` that the main thread reads.
 //!
 //! Both threads auto-reconnect on disconnect with a fixed 5 s backoff.
 //! On reconnect the cache is re-bootstrapped via `getProgramAccounts` so
@@ -179,14 +179,14 @@ pub(crate) fn record_outcome(cache: &Cache, pk: Pubkey, outcome: CacheOutcome) {
     metrics::metrics().cranks_cached.set(len as i64);
 }
 
-/// Spawn the `slotSubscribe` watcher. Sends `slot` values over `tick` for
+/// Spawn the `slotSubscribe` watcher. Sends `(slot, Instant)` over `tick` for
 /// each new slot the RPC node observes. Reconnect loop mirrors the program
 /// watcher.
 pub fn spawn_slot_watcher(
     rpc_url: String,
     ws_url: String,
     shutdown: Arc<AtomicBool>,
-    tick: mpsc::Sender<u64>,
+    tick: mpsc::Sender<(u64, Instant)>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
@@ -226,7 +226,7 @@ fn run_slot_watch(
     ws_url: &str,
     rpc: &RpcClient,
     shutdown: &AtomicBool,
-    tick: &mpsc::Sender<u64>,
+    tick: &mpsc::Sender<(u64, Instant)>,
 ) -> Result<()> {
     let (_sub, rx) = PubsubClient::slot_subscribe(ws_url).context("slotSubscribe connect")?;
     log::info!("slotSubscribe connected");
@@ -239,10 +239,11 @@ fn run_slot_watch(
         }
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(info) => {
-                last_slot_at = Instant::now();
+                let observed_at = Instant::now();
+                last_slot_at = observed_at;
                 last_ws_slot = Some(info.slot);
                 // If the receiver went away, we have nothing to do.
-                if tick.send(info.slot).is_err() {
+                if tick.send((info.slot, observed_at)).is_err() {
                     break Ok(());
                 }
             }
