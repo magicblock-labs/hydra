@@ -1,7 +1,10 @@
 target/
 # Anchor example is its own workspace with its own target dir.
 /examples/anchor/target
+# The root lockfile is committed: verifiable program builds (`solana-verify
+# build`) run with `--locked`. The excluded anchor / e2e workspaces resolve fresh.
 Cargo.lock
+!/Cargo.lock
 hydra-keypair.json
 noop-keypair.json
 *.so

@@ -506,6 +506,27 @@ the tag matches `hydra-api`'s manifest version, dry-runs the package, then
 `cargo publish -p hydra-api`. Requires a `CARGO_REGISTRY_TOKEN` repo
 secret (a crates.io API token scoped to publish-new + publish-update).
 
+### Upgrading the programs
+
+`hydra` and `hydra-ephemeral` are upgraded through a Squads multisig whose
+vault holds their upgrade authority:
+
+1. Run **Propose Program Upgrade** with the program, cluster and ref (commit,
+   tag or branch). It builds the program verifiably with `solana-verify`,
+   uploads a buffer, simulates the upgrade and opens a Squads proposal that
+   upgrades the program and records its otter-verify PDA. Start with
+   `dry_run`: it stops after the simulation and closes the buffer.
+2. Members check the buffer hash against the executable hash in the job
+   summary, then approve and execute in Squads.
+3. On mainnet, run **Verify Program (Remote)** so OtterSec rebuilds the
+   program and explorers mark it verified.
+
+Each cluster needs a GitHub environment named `<cluster>-program-upgrade`
+with `RPC_URL` and `SQUADS_PROPOSER_KEYPAIR` (an Initiate-only member)
+secrets and a `SQUADS_MULTISIG_PDA` variable. Verifiable builds run with
+`--locked`, which is why `Cargo.lock` is committed; `make lock-check` (part
+of `make ci`) fails when it falls out of date.
+
 ## License
 
 MIT

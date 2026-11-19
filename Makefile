@@ -122,9 +122,15 @@ cu-table: build ## Print the per-instruction CU table (the ignored cu_table test
 # ---------------------------------------------------------------------------
 # Aggregate / housekeeping.
 # ---------------------------------------------------------------------------
-.PHONY: ci install-tools install-validators clean
+.PHONY: ci lock-check install-tools install-validators clean
 
-ci: fmt-check lint lint-e2e build test-all ## Run the CI job locally (fmt-check + lint + build + test-all, incl. live e2e)
+ci: lock-check fmt-check lint lint-e2e build test-all ## Run the CI job locally (lock-check + fmt-check + lint + build + test-all, incl. live e2e)
+
+# Verifiable builds (`solana-verify build`, used by the program-upgrade
+# workflow) run with `--locked`, so a stale lockfile would otherwise only
+# surface when proposing an upgrade.
+lock-check: ## Fail if Cargo.lock is out of date with the manifests
+	cargo fetch --locked
 
 install-tools: install-validators ## Install cargo-nextest + the MagicBlock validators
 	cargo install cargo-nextest --locked

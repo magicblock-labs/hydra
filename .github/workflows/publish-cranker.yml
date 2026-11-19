@@ -117,9 +117,9 @@ jobs:
             echo "DRY_RUN=true" >> "$GITHUB_ENV"
           fi
 
-      # No `--locked`: Cargo.lock is gitignored in this repo.
+      # `--locked`: ship exactly the dependencies in the committed Cargo.lock.
       - name: Build
-        run: cargo build -p "$BIN_NAME" --release --target ${{ matrix.build.TARGET }}
+        run: cargo build -p "$BIN_NAME" --release --locked --target ${{ matrix.build.TARGET }}
 
       # The npm version is *derived* from the workspace version rather than
       # duplicated, so the two can never drift. On a real release we additionally
