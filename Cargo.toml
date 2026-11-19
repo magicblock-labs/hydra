@@ -19,7 +19,7 @@ members = [
 exclude = ["examples/anchor", "tests/e2e"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/magicblock-labs/hydra"
