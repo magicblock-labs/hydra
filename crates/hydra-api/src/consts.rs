@@ -6,7 +6,7 @@
 pub const CRANK_SEED_PREFIX: &[u8] = b"crank";
 
 /// Max metas a single scheduled ix may declare.
-pub const MAX_ACCOUNTS: usize = 32;
+pub const MAX_ACCOUNTS: usize = 64;
 
 /// Max number of scheduled instructions a single crank may hold. Bounds the
 /// `Create` validation cost and the crank account's rent footprint. The

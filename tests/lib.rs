@@ -247,6 +247,82 @@ pub fn take_hydra_cu(logger: &Rc<RefCell<LogCollector>>) -> Option<u64> {
 
 /// Run every Hydra scenario through mollusk with a `LogCollector` attached,
 /// then print a per-program / per-tx CU table.
+/// Create + Trigger a single noop scheduled ix carrying `n` distinct writable
+/// metas. Returns `(create_hydra, create_tx, trigger_hydra, trigger_tx)` CU.
+fn bench_metas(
+    mollusk: &Mollusk,
+    logger: &Rc<RefCell<LogCollector>>,
+    n: usize,
+) -> (u64, u64, u64, u64) {
+    // Payer-bound PDA with bump 255 for every `n`, so the PDA search costs the
+    // same in each row and the delta is purely per-meta work.
+    let payer = Pubkey::new_from_array([0x11; 32]);
+    let cranker = Pubkey::new_unique();
+    let (seed, crank) = (0u64..)
+        .find_map(|i| {
+            let mut seed = [0x77u8; 32];
+            seed[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            seed[8..16].copy_from_slice(&i.to_le_bytes());
+            let (pda, bump) = find_crank_for_payer(&payer, &seed);
+            (bump == 255).then_some((seed, pda))
+        })
+        .unwrap();
+    let keys: Vec<Pubkey> = (0..n).map(|_| Pubkey::new_unique()).collect();
+    let metas: Vec<SchedMeta> = keys
+        .iter()
+        .map(|k| SchedMeta::writable(k.to_bytes()))
+        .collect();
+    let sched = [ScheduledIx {
+        program_id: NOOP_ID.to_bytes(),
+        metas: &metas,
+        data: b"tick",
+    }];
+    let create = create_ix_multi(payer, crank, seed, [0u8; 32], 0, 400, 10, 0, 0, &sched);
+    let (system_program, sys_acct) = keyed_account_for_system_program();
+    let mut accounts = vec![
+        (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+        (crank, Account::default()),
+        (cranker, Account::new(0, 0, &system_program)),
+        (system_program, sys_acct),
+    ];
+    accounts.extend(
+        keys.iter()
+            .map(|k| (*k, Account::new(0, 0, &system_program))),
+    );
+    let _ = take_hydra_cu(logger);
+    let r_create = mollusk.process_transaction_instructions(&[create], &accounts);
+    assert!(
+        r_create.raw_result.is_ok(),
+        "create {n} metas: {:?}",
+        r_create.raw_result
+    );
+    let cu_create = take_hydra_cu(logger).expect("hydra log: create metas");
+
+    let mut funded = r_create.resulting_accounts.clone();
+    funded
+        .iter_mut()
+        .find(|(k, _)| k == &crank)
+        .unwrap()
+        .1
+        .lamports += 1_000_000;
+    let data = &funded.iter().find(|(k, _)| k == &crank).unwrap().1.data;
+    let mut tx = vec![trigger_ix(crank, cranker)];
+    tx.extend(hydra_api::instruction::scheduled_ixs_from_crank(data).expect("parse"));
+    let r_trig = mollusk.process_transaction_instructions(&tx, &funded);
+    assert!(
+        r_trig.raw_result.is_ok(),
+        "trigger {n} metas: {:?}",
+        r_trig.raw_result
+    );
+    let cu_trig = take_hydra_cu(logger).expect("hydra log: trigger metas");
+    (
+        cu_create,
+        r_create.compute_units_consumed,
+        cu_trig,
+        r_trig.compute_units_consumed,
+    )
+}
+
 pub fn print_cu_table() {
     let mut mollusk = mollusk_with_hydra();
     load_noop(&mut mollusk);
@@ -486,6 +562,21 @@ pub fn print_cu_table() {
         "  │ Close (happy: underfunded)           │ {:>10} │ {:>8} │",
         cu_close_ok, cu_close_ok_tx
     );
+    for n in [1, 32, hydra_api::consts::MAX_ACCOUNTS] {
+        let (c, c_tx, t, t_tx) = bench_metas(&mollusk, &logger, n);
+        println!(
+            "  │ {:<36} │ {:>10} │ {:>8} │",
+            format!("Create ({n} metas)"),
+            c,
+            c_tx
+        );
+        println!(
+            "  │ {:<36} │ {:>10} │ {:>8} │",
+            format!("Trigger ({n} metas)"),
+            t,
+            t_tx
+        );
+    }
     println!("  └──────────────────────────────────────┴────────────┴──────────┘");
     println!();
     println!("  >> Hydra-only Trigger (happy): {} CU <<", cu_trig_hydra);
@@ -2325,6 +2416,93 @@ mod tests {
             assert!(
                 r.raw_result.is_err(),
                 "create must reject more than MAX_INSTRUCTIONS scheduled ixs"
+            );
+        }
+    }
+
+    #[test]
+    fn create_and_trigger_at_max_accounts_and_reject_one_more() {
+        use hydra_api::consts::MAX_ACCOUNTS;
+
+        let payer = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let targets: Vec<Pubkey> = (0..MAX_ACCOUNTS + 1)
+            .map(|_| Pubkey::new_unique())
+            .collect();
+        let metas: Vec<SchedMeta> = targets
+            .iter()
+            .map(|k| SchedMeta::writable(k.to_bytes()))
+            .collect();
+        let (system_program, sys_acct) = keyed_account_for_system_program();
+
+        // Exactly MAX_ACCOUNTS distinct writable metas -> create + trigger ok.
+        {
+            let mut mollusk = mollusk_with_hydra();
+            load_noop(&mut mollusk);
+            let (crank_pda, _) = find_crank(&SEED);
+            let sched = [ScheduledIx {
+                program_id: NOOP_ID.to_bytes(),
+                metas: &metas[..MAX_ACCOUNTS],
+                data: &[0xAB; hydra_api::consts::MAX_DATA_LEN],
+            }];
+            let ix = create_ix_multi(payer, crank_pda, SEED, [0u8; 32], 0, 100, 10, 0, 0, &sched);
+            let mut accounts = vec![
+                (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+                (crank_pda, Account::default()),
+                (cranker, Account::new(0, 0, &system_program)),
+                (system_program, sys_acct.clone()),
+            ];
+            accounts.extend(
+                targets[..MAX_ACCOUNTS]
+                    .iter()
+                    .map(|k| (*k, Account::new(0, 0, &system_program))),
+            );
+            let r = mollusk.process_transaction_instructions(&[ix], &accounts);
+            assert!(
+                r.raw_result.is_ok(),
+                "create must accept exactly MAX_ACCOUNTS metas: {:?}",
+                r.raw_result
+            );
+
+            let mut funded = r.resulting_accounts.clone();
+            top_up(&mut funded, crank_pda, 1_000_000);
+            let crank_data = &funded.iter().find(|(k, _)| k == &crank_pda).unwrap().1.data;
+            let siblings = hydra_api::instruction::scheduled_ixs_from_crank(crank_data)
+                .expect("parse scheduled ixs");
+            assert_eq!(siblings[0].accounts.len(), MAX_ACCOUNTS);
+
+            let mut tx_ixs = vec![trigger_ix(crank_pda, cranker)];
+            tx_ixs.extend(siblings);
+            let r = mollusk.process_transaction_instructions(&tx_ixs, &funded);
+            assert!(
+                r.raw_result.is_ok(),
+                "trigger must accept a MAX_ACCOUNTS-meta followup: {:?}",
+                r.raw_result
+            );
+        }
+
+        // One past the cap -> rejected.
+        {
+            let mollusk = mollusk_with_hydra();
+            const SEED_OVER: [u8; 32] = [0x56; 32];
+            let (crank_pda, _) = find_crank(&SEED_OVER);
+            let sched = [ScheduledIx {
+                program_id: NOOP_ID.to_bytes(),
+                metas: &metas,
+                data: b"x",
+            }];
+            let ix = create_ix_multi(
+                payer, crank_pda, SEED_OVER, [0u8; 32], 0, 100, 10, 0, 0, &sched,
+            );
+            let accounts = vec![
+                (payer, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+                (crank_pda, Account::default()),
+                (system_program, sys_acct),
+            ];
+            let r = mollusk.process_transaction_instructions(&[ix], &accounts);
+            assert!(
+                r.raw_result.is_err(),
+                "create must reject more than MAX_ACCOUNTS metas"
             );
         }
     }
