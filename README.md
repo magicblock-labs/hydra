@@ -382,9 +382,7 @@ the crank PDA — no dedicated instruction exists.
 
 - `Trigger` is top-level only
 - scheduled instructions cannot include signer metas
-- `MAX_ACCOUNTS = 64` metas per scheduled ix — the trigger transaction must
-  still fit Solana's size (1232 B) and account-lock limits, so many distinct
-  accounts are only practical with duplicates or a lookup-table-aware cranker
+- `MAX_ACCOUNTS = 64`
 - `MAX_DATA_LEN = 1024`
 - reward is fixed at `10_000` lamports plus the stored priority tip
 
