@@ -1,0 +1,73 @@
+name: Propose Program Upgrade
+
+# Builds a Hydra program verifiably and opens a Squads proposal that upgrades it
+# and records its otter-verify PDA. Members approve and execute in Squads, then
+# run verify-program-remote.yml so explorers mark the build as verified.
+#
+# Each cluster is a GitHub environment named <cluster>-program-upgrade with:
+#   secrets   RPC_URL, SQUADS_PROPOSER_KEYPAIR (Initiate-only multisig member)
+#   variable  SQUADS_MULTISIG_PDA (multisig whose vault is the upgrade authority)
+#
+# Start with dry_run: it builds, uploads and simulates, then closes the buffer.
+
+on:
+  workflow_dispatch:
+    inputs:
+      program:
+        description: Program to upgrade
+        type: choice
+        options: [hydra, hydra-ephemeral]
+        default: hydra
+      cluster:
+        description: Target cluster
+        type: choice
+        options: [devnet, mainnet]
+        default: devnet
+      ref:
+        description: Commit SHA, release tag, or branch to build. Defaults to the ref the workflow runs on.
+        default: ""
+      proposal_name:
+        description: Squads proposal memo. Defaults to "Upgrade <program> to <ref>".
+        default: ""
+      dry_run:
+        description: Build, upload and simulate only; close the buffer without proposing
+        type: boolean
+        default: false
+
+# Runs on a cluster share the proposer key and the multisig's transaction index.
+concurrency: program-upgrade-${{ inputs.cluster }}
+
+permissions:
+  contents: read
+
+env:
+  # What each `program` choice upgrades. Pinned here rather than read from the
+  # built ref, so the workflow alone decides which programs it can touch.
+  PROGRAMS: |
+    {
+      "hydra":           { "id": "Hydra17i1feui9deaxu6d1TzSQMRNHeBRkDR1Awy7zea", "library": "hydra" },
+      "hydra-ephemeral": { "id": "eHyd5BU8QffvHi4GnXwxrK4WpS7pM2x9UGKHBWii7mf", "library": "hydra_ephemeral" }
+    }
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.cluster }}-program-upgrade
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: magicblock-labs/.github/actions/squads-program-upgrade@405ea5309c82dfe13fe2241713b883a34f609a02
+        with:
+          rpc-url: ${{ secrets.RPC_URL }}
+          proposer-keypair: ${{ secrets.SQUADS_PROPOSER_KEYPAIR }}
+          multisig: ${{ vars.SQUADS_MULTISIG_PDA }}
+          program-id: ${{ fromJSON(env.PROGRAMS)[inputs.program].id }}
+          library-name: ${{ fromJSON(env.PROGRAMS)[inputs.program].library }}
+          # The toolchain CI builds and tests with; keep in sync with ci.yml.
+          solana-version: v4.0.1
+          proposal-name: ${{ inputs.proposal_name || format('Upgrade {0} to {1}', inputs.program, inputs.ref || github.sha) }}
+          dry-run: ${{ inputs.dry_run }}
