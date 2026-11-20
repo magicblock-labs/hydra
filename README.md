@@ -517,7 +517,9 @@ vault holds their upgrade authority:
    upgrades the program and records its otter-verify PDA. Start with
    `dry_run`: it stops after the simulation and closes the buffer.
 2. Members check the buffer hash against the executable hash in the job
-   summary, then approve and execute in Squads.
+   summary, then approve and execute: in the Squads app on mainnet, and on
+   devnet in the [approval page](https://magicblock-labs.github.io/.github/),
+   which reads the hash from the run and checks it for them.
 3. On mainnet, run **Verify Program (Remote)** so OtterSec rebuilds the
    program and explorers mark it verified.
 

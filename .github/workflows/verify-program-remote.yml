@@ -31,6 +31,6 @@ jobs:
     steps:
       # Reads public mainnet accounts only, so the action's default public RPC
       # is enough and no secret is needed.
-      - uses: magicblock-labs/.github/actions/verify-program-remote@405ea5309c82dfe13fe2241713b883a34f609a02
+      - uses: magicblock-labs/.github/actions/verify-program-remote@ef27487ce794e628f597c00795f573b793dd498d
         with:
           program-id: ${{ fromJSON(env.PROGRAM_IDS)[inputs.program] }}
