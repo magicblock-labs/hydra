@@ -40,6 +40,11 @@ Key constraints:
 - a crank holds at most `MAX_INSTRUCTIONS` (16) scheduled instructions
 - `Trigger` is top-level only
 
+A scheduled instruction may reference its own crank, for example to prove which
+crank it was fired from. List the crank writable: `Trigger` writes it, and the
+instructions sysvar records each account's transaction-level flags, so a
+read-only entry would never match the stored template.
+
 ## Motivation
 
 Hydra is not a general-purpose automation platform. It's a minimal runner

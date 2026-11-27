@@ -2508,6 +2508,102 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_trigger_accepts_followup_that_references_its_crank_and_the_sysvar() {
+        // The MagicBlock validator stores tasks that sign with their crank
+        // signer PDA as one Crank program `ExecuteCrank` follow-up. That
+        // program proves the crank was created by the validator, so the
+        // follow-up references the crank itself (writable, as `Trigger` writes
+        // it), the crank signer PDA, and the instructions sysvar to find the
+        // preceding `Trigger`. The cranker must be able to fire that shape
+        // unchanged. Noop stands in for the validator-native Crank program.
+        //
+        // Mollusk builds the instructions sysvar from per-instruction flags,
+        // while validators record transaction-level flags, so this cannot
+        // catch a crank listed read-only; the validator's own tests do.
+        let base = mollusk_with_hydra();
+        let sponsor = Pubkey::new_unique();
+        let cranker = Pubkey::new_unique();
+        let crank_signer = Pubkey::new_unique();
+        let task_account = Pubkey::new_unique();
+        let (crank_pda, _bump) = find_crank(&SEED);
+
+        let create = create_ix(
+            sponsor,
+            crank_pda,
+            SEED,
+            sponsor.to_bytes(),
+            0,
+            1,
+            0,
+            0,
+            0,
+            NOOP_ID,
+            &[
+                SchedMeta::writable(crank_pda.to_bytes()),
+                SchedMeta::readonly(crank_signer.to_bytes()),
+                SchedMeta::readonly(INSTRUCTIONS_SYSVAR_ID.to_bytes()),
+                SchedMeta::writable(task_account.to_bytes()),
+            ],
+            b"execute-crank",
+        );
+        let (system_program, system_program_acct) = keyed_account_for_system_program();
+        let create_accounts = vec![
+            (sponsor, Account::new(PAYER_LAMPORTS, 0, &system_program)),
+            (crank_pda, Account::default()),
+            (system_program, system_program_acct.clone()),
+        ];
+        let after_create = base.process_transaction_instructions(&[create], &create_accounts);
+        assert!(
+            after_create.raw_result.is_ok(),
+            "{:?}",
+            after_create.raw_result
+        );
+
+        let mut crank_acct = after_create
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a.clone())
+            .expect("crank after create");
+        // What the Crank program checks to trust the template.
+        let header = decode_header(&crank_acct.data);
+        assert_eq!(header.authority, sponsor.to_bytes());
+        assert_eq!(header.authority_signer, 1);
+        assert_eq!(header.seed, SEED);
+        crank_acct.owner = eph_id();
+
+        let mut eph = mollusk_with_hydra_ephemeral();
+        load_noop(&mut eph);
+        // Rebuild the follow-up from the crank bytes, as the cranker does.
+        let siblings = hydra_api::instruction::scheduled_ixs_from_crank(&crank_acct.data)
+            .expect("parse scheduled ixs");
+        let mut tx_ixs = vec![hydra_api::instruction::ephemeral::trigger(
+            crank_pda, cranker,
+        )];
+        tx_ixs.extend(siblings);
+        let accounts = vec![
+            (crank_pda, crank_acct),
+            (cranker, Account::new(0, 0, &system_program)),
+            (crank_signer, Account::default()),
+            (task_account, Account::new(0, 0, &system_program)),
+            (system_program, system_program_acct),
+        ];
+        let after = eph.process_transaction_instructions(&tx_ixs, &accounts);
+        assert!(
+            after.raw_result.is_ok(),
+            "follow-up referencing its crank must satisfy Trigger: {:?}",
+            after.raw_result
+        );
+        let crank_after = after
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &crank_pda)
+            .map(|(_, a)| a)
+            .expect("crank after trigger");
+        assert_eq!(decode_header(&crank_after.data).executed(), 1);
+    }
+
+    #[test]
     fn scheduled_ixs_from_crank_roundtrip_triggers() {
         // The cranker reconstructs siblings purely from on-chain crank bytes via
         // `scheduled_ixs_from_crank`. Feeding those reconstructed ixs back as the
