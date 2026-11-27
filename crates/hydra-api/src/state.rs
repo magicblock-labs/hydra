@@ -15,7 +15,8 @@
 //! ```text
 //! [0..2]                        num_accounts           u16 LE
 //! [2..2 + 33*num_accounts]      metas: [flag:u8][pubkey:[u8;32]] each
-//!                                flag bit 0 = is_signer  (MUST be 0; rejected at Create)
+//!                                flag bit 0 = is_signer  (base: rejected at Create;
+//!                                ephemeral: PDAs only, run via the Crank program)
 //!                                flag bit 1 = is_writable
 //! [+32]                         program_id             [u8; 32]
 //! [+2]                          data_len               u16 LE

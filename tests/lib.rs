@@ -2507,26 +2507,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ephemeral_trigger_accepts_followup_that_references_its_crank_and_the_sysvar() {
-        // The MagicBlock validator stores tasks that sign with their crank
-        // signer PDA as one Crank program `ExecuteCrank` follow-up. That
-        // program proves the crank was created by the validator, so the
-        // follow-up references the crank itself (writable, as `Trigger` writes
-        // it), the crank signer PDA, and the instructions sysvar to find the
-        // preceding `Trigger`. The cranker must be able to fire that shape
-        // unchanged. Noop stands in for the validator-native Crank program.
-        //
-        // Mollusk builds the instructions sysvar from per-instruction flags,
-        // while validators record transaction-level flags, so this cannot
-        // catch a crank listed read-only; the validator's own tests do.
+    /// An ephemeral crank whose single scheduled ix signs with a PDA, plus
+    /// the accounts a `Trigger` of it needs. Base `Create` rejects signer
+    /// metas and ephemeral `Create` needs the Magic program, so the crank is
+    /// created on base without the flag, which is then set in the stored tail.
+    fn ephemeral_signer_crank() -> (Pubkey, Pubkey, Vec<(Pubkey, Account)>) {
         let base = mollusk_with_hydra();
         let sponsor = Pubkey::new_unique();
-        let cranker = Pubkey::new_unique();
-        let crank_signer = Pubkey::new_unique();
+        let (pda_signer, _) = Pubkey::find_program_address(
+            &[b"crank-executor", sponsor.as_ref()],
+            &crank_program_id(),
+        );
         let task_account = Pubkey::new_unique();
         let (crank_pda, _bump) = find_crank(&SEED);
-
         let create = create_ix(
             sponsor,
             crank_pda,
@@ -2539,12 +2532,10 @@ mod tests {
             0,
             NOOP_ID,
             &[
-                SchedMeta::writable(crank_pda.to_bytes()),
-                SchedMeta::readonly(crank_signer.to_bytes()),
-                SchedMeta::readonly(INSTRUCTIONS_SYSVAR_ID.to_bytes()),
+                SchedMeta::readonly(pda_signer.to_bytes()),
                 SchedMeta::writable(task_account.to_bytes()),
             ],
-            b"execute-crank",
+            b"signed",
         );
         let (system_program, system_program_acct) = keyed_account_for_system_program();
         let create_accounts = vec![
@@ -2558,49 +2549,109 @@ mod tests {
             "{:?}",
             after_create.raw_result
         );
-
         let mut crank_acct = after_create
             .resulting_accounts
             .iter()
             .find(|(k, _)| k == &crank_pda)
             .map(|(_, a)| a.clone())
             .expect("crank after create");
-        // What the Crank program checks to trust the template.
-        let header = decode_header(&crank_acct.data);
-        assert_eq!(header.authority, sponsor.to_bytes());
-        assert_eq!(header.authority_signer, 1);
-        assert_eq!(header.seed, SEED);
+        // Flag byte of the first meta: after the tail's `num_accounts` u16.
+        crank_acct.data[CRANK_HEADER_SIZE + 2] |= hydra_api::consts::META_FLAG_SIGNER;
         crank_acct.owner = eph_id();
 
-        let mut eph = mollusk_with_hydra_ephemeral();
-        load_noop(&mut eph);
-        // Rebuild the follow-up from the crank bytes, as the cranker does.
-        let siblings = hydra_api::instruction::scheduled_ixs_from_crank(&crank_acct.data)
-            .expect("parse scheduled ixs");
-        let mut tx_ixs = vec![hydra_api::instruction::ephemeral::trigger(
-            crank_pda, cranker,
-        )];
-        tx_ixs.extend(siblings);
+        let cranker = Pubkey::new_unique();
         let accounts = vec![
             (crank_pda, crank_acct),
             (cranker, Account::new(0, 0, &system_program)),
-            (crank_signer, Account::default()),
+            (pda_signer, Account::default()),
             (task_account, Account::new(0, 0, &system_program)),
             (system_program, system_program_acct),
+            // `ExecuteCrank` lists the scheduled programs as accounts.
+            (
+                NOOP_ID,
+                mollusk_svm::program::create_program_account_loader_v3(&NOOP_ID),
+            ),
         ];
-        let after = eph.process_transaction_instructions(&tx_ixs, &accounts);
-        assert!(
-            after.raw_result.is_ok(),
-            "follow-up referencing its crank must satisfy Trigger: {:?}",
-            after.raw_result
-        );
+        (crank_pda, cranker, accounts)
+    }
+
+    fn crank_program_id() -> Pubkey {
+        Pubkey::new_from_array(hydra_api::consts::crank_program::ID.to_bytes())
+    }
+
+    /// Ephemeral Hydra with noop standing in for the validator-native Crank
+    /// program, which authenticates the crank and its signers itself.
+    fn mollusk_with_crank_program() -> Mollusk {
+        let mut eph = mollusk_with_hydra_ephemeral();
+        load_noop(&mut eph);
+        eph.add_program(&crank_program_id(), NOOP_SO);
+        eph
+    }
+
+    #[test]
+    fn ephemeral_trigger_runs_pda_signer_cranks_through_the_crank_program() {
+        let (crank, cranker, accounts) = ephemeral_signer_crank();
+        let scheduled = hydra_api::instruction::scheduled_ixs_from_crank(&accounts[0].1.data)
+            .expect("parse scheduled ixs");
+        // The cranker decodes the PDA signer and routes the crank.
+        assert!(hydra_api::instruction::needs_crank_program(&scheduled));
+        let execute = hydra_api::instruction::ephemeral::execute_crank(crank, &scheduled);
+        assert!(execute.accounts.iter().all(|meta| !meta.is_signer));
+
+        let eph = mollusk_with_crank_program();
+        let trigger = hydra_api::instruction::ephemeral::trigger(crank, cranker);
+        let after = eph.process_transaction_instructions(&[trigger, execute], &accounts);
+        assert!(after.raw_result.is_ok(), "{:?}", after.raw_result);
         let crank_after = after
             .resulting_accounts
             .iter()
-            .find(|(k, _)| k == &crank_pda)
+            .find(|(k, _)| k == &crank)
             .map(|(_, a)| a)
             .expect("crank after trigger");
         assert_eq!(decode_header(&crank_after.data).executed(), 1);
+    }
+
+    #[test]
+    fn ephemeral_trigger_rejects_lookalike_crank_program_followups() {
+        let (crank, cranker, accounts) = ephemeral_signer_crank();
+        let scheduled = hydra_api::instruction::scheduled_ixs_from_crank(&accounts[0].1.data)
+            .expect("parse scheduled ixs");
+        let execute = hydra_api::instruction::ephemeral::execute_crank(crank, &scheduled);
+        let eph = mollusk_with_crank_program();
+        let trigger = hydra_api::instruction::ephemeral::trigger(crank, cranker);
+        let rejected = |followup: Instruction, why: &str| {
+            let after =
+                eph.process_transaction_instructions(&[trigger.clone(), followup], &accounts);
+            match after.program_result {
+                TransactionProgramResult::Failure(_, err) => assert_eq!(
+                    u64::from(err),
+                    hydra_api::HydraError::MismatchedFollowupIx as u64,
+                    "{why}"
+                ),
+                other => panic!("{why}: expected a program failure, got {other:?}"),
+            }
+        };
+
+        // A transaction signature, here the cranker's, must never reach the
+        // Crank program or the ixs it runs.
+        let mut with_signer = execute.clone();
+        with_signer.accounts.push(AccountMeta::new(cranker, true));
+        rejected(with_signer, "signer in the delegated follow-up");
+        // The Crank program runs the crank it is given: it must be this one.
+        let mut other_crank = execute.clone();
+        other_crank.accounts[0].pubkey = accounts[3].0;
+        rejected(other_crank, "follow-up for another crank");
+        let mut other_data = execute.clone();
+        other_data.data = vec![1, 0, 0, 0];
+        rejected(other_data, "another Crank program instruction");
+        let mut other_program = execute.clone();
+        other_program.program_id = NOOP_ID;
+        rejected(other_program, "another program");
+        // Replaying the stored ix verbatim cannot work either: nobody holds
+        // the PDA's key, so the replay can only carry it unsigned.
+        let mut unsigned = scheduled[0].clone();
+        unsigned.accounts[0].is_signer = false;
+        rejected(unsigned, "verbatim replay without the PDA signature");
     }
 
     #[test]

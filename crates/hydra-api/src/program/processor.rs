@@ -8,8 +8,8 @@ use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
 use crate::{
     consts::{
-        self, MAX_ACCOUNTS, MAX_COMPUTE_UNIT_LIMIT, MAX_DATA_LEN, MAX_INSTRUCTIONS,
-        META_FLAG_SIGNER, REMAINING_INFINITE, SERIALIZED_META_SIZE,
+        self, crank_program, CRANK_EXECUTE_DATA, MAX_ACCOUNTS, MAX_COMPUTE_UNIT_LIMIT,
+        MAX_DATA_LEN, MAX_INSTRUCTIONS, META_FLAG_SIGNER, REMAINING_INFINITE, SERIALIZED_META_SIZE,
     },
     instruction::{CREATE_FIXED_PREFIX_LEN, CREATE_IX_HEADER_LEN},
     program::helpers::get_clock_slot,
@@ -203,7 +203,16 @@ pub fn derive_crank_pda(
 /// `CRANK_HEADER_SIZE + region_len`; `rent_min` is the cached rent floor for base
 /// cranks and `0` for ephemeral cranks (which hold no lamports). Shared by both
 /// `Create` paths.
-pub fn write_crank(
+///
+/// `PDA_SIGNERS` sets whether scheduled-ix metas may carry the `is_signer`
+/// flag. It is a compile-time switch, so base `Create` compiles as before.
+/// - `false`, base `Create`: no signer flags, since every scheduled ix runs
+///   top-level after `Trigger`, where only real keys can sign.
+/// - `true`, ephemeral `Create`: signer flags on off-curve keys (PDAs) only. A
+///   PDA can never sign a transaction, so such a crank cannot fire top-level:
+///   only its owner program can sign for it, through `Trigger`'s delegated
+///   path. Keys that can sign, such as a cranker's, stay rejected.
+pub fn write_crank<const PDA_SIGNERS: bool>(
     crank_ai: &mut AccountView,
     data: &[u8],
     header: &CreateHeader,
@@ -219,7 +228,7 @@ pub fn write_crank(
     }
     let (header_bytes, tail_bytes) = buf.split_at_mut(CRANK_HEADER_SIZE);
 
-    let written = write_tail(tail_bytes, data)?;
+    let written = write_tail::<PDA_SIGNERS>(tail_bytes, data)?;
     if written != region_len {
         return Err(HydraError::InvalidSchedule.into());
     }
@@ -244,7 +253,10 @@ pub fn write_crank(
 ///
 /// Mirrors the tail layout produced by `processor::create` — see that file for
 /// the wire format. Kept separate so the audited base path stays untouched.
-pub fn write_tail(tail: &mut [u8], data: &[u8]) -> Result<usize, ProgramError> {
+pub fn write_tail<const PDA_SIGNERS: bool>(
+    tail: &mut [u8],
+    data: &[u8],
+) -> Result<usize, ProgramError> {
     let cap = tail.len();
     let mut cursor = CREATE_FIXED_PREFIX_LEN;
     let mut off = 0usize;
@@ -259,14 +271,20 @@ pub fn write_tail(tail: &mut [u8], data: &[u8]) -> Result<usize, ProgramError> {
         let metas_offset = cursor + CREATE_IX_HEADER_LEN;
         let metas_len = num_accounts * SERIALIZED_META_SIZE;
         let data_offset = metas_offset + metas_len;
-        // For each meta: reject signer flags (scheduled ixs run top-level and
-        // can only be signed by real keys, which this program can't produce),
-        // and fold the account into the writability-conflict tracker.
+        // For each meta: reject signer flags that `PDA_SIGNERS` does not allow
+        // (scheduled ixs run top-level and can only be signed by real keys,
+        // which this program can't produce).
         for account_index in 0..num_accounts {
             let meta_offset = metas_offset + account_index * SERIALIZED_META_SIZE;
             let meta_flag = data[meta_offset];
             if meta_flag & META_FLAG_SIGNER != 0 {
-                return Err(HydraError::SignerInScheduledIx.into());
+                let allowed = PDA_SIGNERS
+                    && !solana_address::bytes_are_curve_point(
+                        &data[meta_offset + 1..meta_offset + SERIALIZED_META_SIZE],
+                    );
+                if !allowed {
+                    return Err(HydraError::SignerInScheduledIx.into());
+                }
             }
         }
 
@@ -370,6 +388,77 @@ pub fn verify_followup(
 
     if sv_region != tail {
         return Err(HydraError::MismatchedFollowupIx.into());
+    }
+    Ok(())
+}
+
+/// Accepts the follow-up of `Trigger` when the Crank program executes the
+/// crank instead of the cranker replaying its scheduled ixs.
+///
+/// Cranks whose scheduled ixs carry a PDA signer can only run through the
+/// program that owns that PDA, so the cranker sends the Crank program's
+/// `ExecuteCrank` of this crank instead. Hydra checks the shape of that call:
+/// - program is the Crank program, data is exactly `ExecuteCrank`;
+/// - its first account is this crank, so the Crank program reads and runs this
+///   crank's stored ixs, and nothing else;
+/// - no account is a signer, so no transaction signature, such as the
+///   cranker's, reaches the Crank program or the ixs it runs.
+///
+/// The Crank program authenticates the crank and its signers itself. Cranks
+/// without signers keep the byte-for-byte check of [`verify_followup`].
+#[inline(always)]
+pub fn verify_delegated_followup(sysvar: &AccountView, crank: &AccountView) -> ProgramResult {
+    // SAFETY: as in `verify_followup`, no outstanding borrows.
+    let sv: &[u8] = unsafe { sysvar.borrow_unchecked() };
+    let mismatch = || ProgramError::from(HydraError::MismatchedFollowupIx);
+
+    let sv_len = sv.len();
+    if sv_len < 4 {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let current = unsafe { read_u16(sv.as_ptr().add(sv_len - 2)) } as usize;
+    let target = current
+        .checked_add(1)
+        .ok_or(HydraError::MissingFollowupInstruction)?;
+    let num_ix = unsafe { read_u16(sv.as_ptr()) } as usize;
+    if target >= num_ix {
+        return Err(HydraError::MissingFollowupInstruction.into());
+    }
+    // Every read below stays before the trailing current-index bytes.
+    let body = &sv[..sv_len - 2];
+    let u16_at = |at: usize| -> Result<usize, ProgramError> {
+        let bytes = body.get(at..at + 2).ok_or_else(mismatch)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]) as usize)
+    };
+
+    let start = u16_at(2 + 2 * target)?;
+    let num_accounts = u16_at(start)?;
+    if num_accounts == 0 {
+        return Err(mismatch());
+    }
+    let metas_start = start + 2;
+    let metas_end = metas_start + num_accounts * SERIALIZED_META_SIZE;
+    let metas = body.get(metas_start..metas_end).ok_or_else(mismatch)?;
+    if metas[1..SERIALIZED_META_SIZE] != *crank.address().as_array() {
+        return Err(mismatch());
+    }
+    if metas
+        .chunks_exact(SERIALIZED_META_SIZE)
+        .any(|meta| meta[0] & META_FLAG_SIGNER != 0)
+    {
+        return Err(mismatch());
+    }
+    let program_id = body.get(metas_end..metas_end + 32).ok_or_else(mismatch)?;
+    if program_id != crank_program::ID.as_array() {
+        return Err(mismatch());
+    }
+    let data_len = u16_at(metas_end + 32)?;
+    let data_start = metas_end + 34;
+    let data = body
+        .get(data_start..data_start + data_len)
+        .ok_or_else(mismatch)?;
+    if data != CRANK_EXECUTE_DATA {
+        return Err(mismatch());
     }
     Ok(())
 }
@@ -500,4 +589,49 @@ pub fn process_close(
     recipient.set_lamports(new_recipient);
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "client"))]
+mod tests {
+    extern crate std;
+    use std::vec::Vec;
+
+    use solana_pubkey::Pubkey;
+
+    use super::*;
+
+    /// `Create` data with one scheduled ix whose single meta is a signer.
+    fn create_data(signer: &Pubkey) -> Vec<u8> {
+        let mut data = std::vec![0u8; CREATE_FIXED_PREFIX_LEN];
+        data.push(1); // num_accounts
+        data.extend_from_slice(&0u16.to_le_bytes()); // data_len
+        data.extend_from_slice(&[7; 32]); // program_id
+        data.push(META_FLAG_SIGNER);
+        data.extend_from_slice(signer.as_ref());
+        data
+    }
+
+    fn write<const PDA_SIGNERS: bool>(signer: &Pubkey) -> Result<usize, ProgramError> {
+        let data = create_data(signer);
+        let mut tail = std::vec![0u8; measure_region(&data).unwrap()];
+        write_tail::<PDA_SIGNERS>(&mut tail, &data)
+    }
+
+    #[test]
+    fn signer_flags_are_only_accepted_on_pdas_of_ephemeral_cranks() {
+        let crank_program = Pubkey::new_from_array(crank_program::ID.to_bytes());
+        let (pda, _) = Pubkey::find_program_address(&[b"crank-executor", &[1; 32]], &crank_program);
+        // Any key with a private key could be the cranker's.
+        let keypair_like = Pubkey::new_from_array([
+            0x3b, 0x6a, 0x27, 0xbc, 0xce, 0xb6, 0xa4, 0x2d, 0x62, 0xa3, 0xa8, 0xd0, 0x2a, 0x6f,
+            0x0d, 0x73, 0x65, 0x32, 0x15, 0x77, 0x1d, 0xe2, 0x43, 0xa6, 0x3a, 0xc0, 0x48, 0xa1,
+            0x8b, 0x59, 0xda, 0x29,
+        ]);
+        assert!(keypair_like.is_on_curve());
+
+        assert!(write::<true>(&pda).is_ok());
+        let rejected = Err(HydraError::SignerInScheduledIx.into());
+        assert_eq!(write::<true>(&keypair_like), rejected);
+        assert_eq!(write::<false>(&pda), rejected);
+    }
 }

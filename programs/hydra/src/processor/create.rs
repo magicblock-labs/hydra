@@ -138,7 +138,7 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     }
 
     // The account is sized to `region_len`, so `write_crank` fills it exactly.
-    write_crank(
+    write_crank::<false>(
         crank_ai,
         data,
         &header,
