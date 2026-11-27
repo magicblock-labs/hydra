@@ -39,6 +39,17 @@ pub const META_FLAG_SIGNER: u8 = 0b0000_0001;
 /// Instructions-sysvar per-meta flag: `is_writable` bit.
 pub const META_FLAG_WRITABLE: u8 = 0b0000_0010;
 
+/// The MagicBlock Crank program. On an ephemeral rollup it executes cranks
+/// whose scheduled instructions need a signature only it can produce: the
+/// crank signer PDA `["crank-executor", authority]` of a task authority.
+pub mod crank_program {
+    solana_address::declare_id!("Crank11111111111111111111111111111111111111");
+}
+
+/// Wire data of the Crank program's `ExecuteCrank`: its enum discriminant
+/// (`u32` LE). The Crank program reads the instructions to run from the crank.
+pub const CRANK_EXECUTE_DATA: [u8; 4] = [0, 0, 0, 0];
+
 /// Instruction discriminators. One byte each, matched in the entrypoint.
 pub mod ix {
     pub const CREATE: u8 = 0;

@@ -35,10 +35,32 @@ scheduled instruction fails, the whole transaction rolls back.
 Key constraints:
 
 - scheduled instructions run top-level, not via CPI
-- scheduled instructions cannot require signer metas
+- scheduled instructions cannot require signer metas, except PDA signers on
+  ephemeral cranks (see below)
 - the scheduled instructions must be contiguous and in order, right after `Trigger`
 - a crank holds at most `MAX_INSTRUCTIONS` (16) scheduled instructions
 - `Trigger` is top-level only
+
+### PDA signers on ephemeral cranks
+
+On a MagicBlock ephemeral rollup, a scheduled instruction may require the
+signature of a PDA, such as a task's crank signer
+`["crank-executor", authority]` under the Crank program
+(`Crank11111111111111111111111111111111111111`). Nobody holds a PDA's key, so
+such a crank cannot be replayed top-level. Instead:
+
+- ephemeral `Create` accepts a signer flag only on an off-curve key, so a key
+  that can sign, such as a cranker's, is never stored as a signer;
+- the cranker sends the Crank program's `ExecuteCrank` of the crank after
+  `Trigger`, in place of the scheduled instructions;
+- `Trigger` accepts that follow-up only if it targets the Crank program with
+  `ExecuteCrank` data, names this crank as its first account, and carries no
+  signer, so no transaction signature reaches the instructions it runs;
+- the Crank program reads the scheduled instructions from the crank, checks
+  that the validator created it, and runs them with the PDA signature.
+
+Cranks without signer metas are unaffected: the cranker replays them verbatim
+and `Trigger` checks them with the same `memcmp`.
 
 ## Motivation
 

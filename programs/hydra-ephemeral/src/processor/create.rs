@@ -7,6 +7,8 @@
 //! Accounts: `[sponsor(w,s), crank(w), vault(w), magic_program(ro)]`.
 //! Data: identical to base `Create`'s body (seed, authority, schedule, scheduled
 //! ixs). `sponsor` sets `authority_signer` and pays the per-byte ephemeral rent.
+//! Unlike base `Create`, a scheduled-ix meta may be a signer if it is a PDA:
+//! such a crank only fires through the Crank program (see `Trigger`).
 
 use ephemeral_rollups_pinocchio::ephemeral_accounts::EphemeralAccount;
 use pinocchio::{
@@ -70,7 +72,8 @@ pub fn process(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
 
     // The account is sized to `region_len`, so `write_crank` fills it exactly.
     // Ephemeral cranks hold no lamports, so the rent floor is `0`.
-    write_crank(
+    // PDA signers run through their owner program; see `Trigger`.
+    write_crank::<true>(
         crank_ai,
         data,
         &header,

@@ -60,6 +60,26 @@ fn set_compute_unit_limit(units: u32) -> Instruction {
     }
 }
 
+/// The instructions that follow `Trigger` of `crank`.
+///
+/// A crank is replayed verbatim, except when its scheduled ixs need a PDA
+/// signer: nobody holds a PDA's key, so the Crank program executes those and
+/// signs for the PDA.
+fn followups(
+    crank: Pubkey,
+    scheduled: Vec<Instruction>,
+    ephemeral: bool,
+) -> Result<Vec<Instruction>> {
+    if !ix::needs_crank_program(&scheduled) {
+        return Ok(scheduled);
+    }
+    // Base `Create` rejects signer metas, so this is never a base crank.
+    if !ephemeral {
+        return Err(anyhow!("crank {crank} has signer metas"));
+    }
+    Ok(vec![ix::ephemeral::execute_crank(crank, &scheduled)])
+}
+
 pub fn fire_trigger(
     rpc: &RpcClient,
     cranker: &Keypair,
@@ -93,7 +113,11 @@ pub fn fire_trigger(
         ixs.push(set_compute_unit_price(priority_fee_micro_lamports));
     }
     ixs.push(trigger);
-    ixs.extend(scheduled);
+    ixs.extend(followups(
+        entry.pubkey,
+        scheduled,
+        crate::mode::is_ephemeral(),
+    )?);
     let msg = Message::new_with_blockhash(&ixs, Some(&cranker.pubkey()), &blockhash);
     let tx = Transaction::new(&[cranker], msg, blockhash);
     // Preflight catches reverts before the leader charges fees, but also
@@ -220,4 +244,41 @@ pub fn fire_close(
             .inc();
         anyhow::Error::new(e).context("send_transaction")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use solana_instruction::AccountMeta;
+
+    use super::*;
+
+    fn scheduled(signer: bool) -> Vec<Instruction> {
+        vec![Instruction::new_with_bytes(
+            Pubkey::new_unique(),
+            &[1],
+            vec![
+                AccountMeta::new_readonly(Pubkey::new_unique(), signer),
+                AccountMeta::new(Pubkey::new_unique(), false),
+            ],
+        )]
+    }
+
+    #[test]
+    fn cranks_without_signers_are_replayed_verbatim() {
+        let ixs = scheduled(false);
+        let crank = Pubkey::new_unique();
+        assert_eq!(followups(crank, ixs.clone(), true).unwrap(), ixs);
+        assert_eq!(followups(crank, ixs.clone(), false).unwrap(), ixs);
+    }
+
+    #[test]
+    fn cranks_with_pda_signers_run_through_the_crank_program() {
+        let ixs = scheduled(true);
+        let crank = Pubkey::new_unique();
+        assert_eq!(
+            followups(crank, ixs.clone(), true).unwrap(),
+            vec![ix::ephemeral::execute_crank(crank, &ixs)]
+        );
+        assert!(followups(crank, ixs, false).is_err());
+    }
 }

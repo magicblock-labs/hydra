@@ -41,13 +41,14 @@ pub const CREATE_IX_HEADER_LEN: usize = 1 + 2 + 32; // = 35
 
 /// A scheduled-ix meta as it will be stored on-chain.
 ///
-/// `is_signer` is intentionally absent: scheduled ixs cannot carry
-/// signer flags (enforced by `Create`), and the on-chain template
-/// stores only the writable bit anyway.
+/// `is_signer` is only accepted by the ephemeral `Create`, and only on a PDA
+/// (an off-curve key): such a crank runs through the Crank program, which
+/// signs for its own PDAs. Base `Create` rejects every signer flag.
 #[derive(Clone, Copy)]
 pub struct SchedMeta {
     pub pubkey: [u8; 32],
     pub is_writable: bool,
+    pub is_signer: bool,
 }
 
 impl SchedMeta {
@@ -55,12 +56,22 @@ impl SchedMeta {
         Self {
             pubkey,
             is_writable: false,
+            is_signer: false,
         }
     }
     pub fn writable(pubkey: [u8; 32]) -> Self {
         Self {
             pubkey,
             is_writable: true,
+            is_signer: false,
+        }
+    }
+    /// A read-only PDA signer, see [`SchedMeta`].
+    pub fn readonly_signer(pubkey: [u8; 32]) -> Self {
+        Self {
+            pubkey,
+            is_writable: false,
+            is_signer: true,
         }
     }
 }
@@ -76,7 +87,7 @@ pub struct ScheduledIx<'a> {
 ///
 /// # Caller responsibilities (the program does NOT check these)
 ///
-/// `Create` validates the wire format, the signer-flag ban, and a few
+/// `Create` validates the wire format, the signer-flag rules, and a few
 /// numeric bounds, but it deliberately does **not** verify that the schedule
 /// is actually *crankable*. A schedule that violates any rule below is
 /// accepted and stored, but every `Trigger` will fail — the crank is created
@@ -164,7 +175,8 @@ impl CreateArgs<'_> {
             off += 32;
 
             for m in s.metas {
-                let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 };
+                let flag: u8 = if m.is_writable { META_FLAG_WRITABLE } else { 0 }
+                    | if m.is_signer { META_FLAG_SIGNER } else { 0 };
                 data[off] = flag;
                 off += 1;
 
@@ -192,7 +204,7 @@ mod client {
     use solana_instruction::{AccountMeta, Instruction};
     use solana_pubkey::{pubkey, Pubkey};
 
-    use crate::consts::{ix, META_FLAG_WRITABLE};
+    use crate::consts::{ix, META_FLAG_SIGNER, META_FLAG_WRITABLE};
     use crate::instruction::CREATE_FIXED_PREFIX_LEN;
 
     use super::*;
@@ -292,6 +304,7 @@ mod client {
     #[cfg(feature = "ephemeral")]
     pub mod ephemeral {
         use super::*;
+        use crate::consts::{crank_program, CRANK_EXECUTE_DATA};
 
         /// The Magic program id, inlined rather than imported from
         /// `ephemeral-rollups-pinocchio`, which depends on this crate.
@@ -338,6 +351,42 @@ mod client {
             }
         }
 
+        /// Build the Crank program's `ExecuteCrank` of `crank`, the follow-up of
+        /// `Trigger` for a crank whose `scheduled` ixs need a PDA signer.
+        ///
+        /// The Crank program reads the ixs to run from the crank itself; this
+        /// instruction only supplies their accounts. Each account is listed
+        /// once, writable if any scheduled ix writes it, and never as a signer:
+        /// `Trigger` rejects a delegated follow-up that carries signers.
+        pub fn execute_crank(crank: Pubkey, scheduled: &[Instruction]) -> Instruction {
+            let mut accounts = alloc::vec![
+                AccountMeta::new(crank, false),
+                AccountMeta::new_readonly(INSTRUCTIONS_SYSVAR_ID, false),
+            ];
+            let mut add = |pubkey: Pubkey, is_writable: bool| match accounts
+                .iter_mut()
+                .find(|meta| meta.pubkey == pubkey)
+            {
+                Some(meta) => meta.is_writable |= is_writable,
+                None => accounts.push(AccountMeta {
+                    pubkey,
+                    is_signer: false,
+                    is_writable,
+                }),
+            };
+            for ix in scheduled {
+                add(ix.program_id, false);
+                for meta in &ix.accounts {
+                    add(meta.pubkey, meta.is_writable);
+                }
+            }
+            Instruction {
+                program_id: Pubkey::new_from_array(crank_program::ID.to_bytes()),
+                accounts,
+                data: CRANK_EXECUTE_DATA.to_vec(),
+            }
+        }
+
         /// Build a `Cancel` instruction. `recipient` receives the crank's drained
         /// lamport balance; the vault rent refunds to `authority`.
         pub fn cancel(authority: Pubkey, crank: Pubkey, recipient: Pubkey) -> Instruction {
@@ -373,6 +422,14 @@ mod client {
                 data: alloc::vec![ix::CLOSE],
             }
         }
+    }
+
+    /// Whether a crank's scheduled ixs need a PDA signature, so that they must
+    /// run through the Crank program (see [`ephemeral::execute_crank`]).
+    pub fn needs_crank_program(scheduled: &[Instruction]) -> bool {
+        scheduled
+            .iter()
+            .any(|ix| ix.accounts.iter().any(|meta| meta.is_signer))
     }
 
     /// Reconstruct all scheduled instructions from a crank's raw account bytes.
@@ -414,10 +471,11 @@ mod client {
                 let flag = tail[base];
                 let pk = Pubkey::new_from_array(tail[base + 1..base + 33].try_into().ok()?);
                 let is_writable = flag & META_FLAG_WRITABLE != 0;
+                let is_signer = flag & META_FLAG_SIGNER != 0;
                 accounts.push(if is_writable {
-                    AccountMeta::new(pk, false)
+                    AccountMeta::new(pk, is_signer)
                 } else {
-                    AccountMeta::new_readonly(pk, false)
+                    AccountMeta::new_readonly(pk, is_signer)
                 });
             }
 
@@ -439,4 +497,4 @@ mod client {
 #[cfg(feature = "client")]
 pub use client::*;
 
-use crate::{ix, META_FLAG_WRITABLE};
+use crate::{ix, META_FLAG_SIGNER, META_FLAG_WRITABLE};

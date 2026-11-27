@@ -2,7 +2,9 @@
 //!
 //! Runs a crank's scheduled ixs once, on the ephemeral rollup. Same top-level +
 //! instructions-sysvar + memcmp follow-up verification, cranker payout and
-//! schedule advance as base `Trigger`. The crank holds its reward budget as a
+//! schedule advance as base `Trigger`. The follow-up may instead be the Crank
+//! program's `ExecuteCrank` of this crank, which runs the stored ixs itself and
+//! signs for its PDAs (see `verify_delegated_followup`). The crank holds its reward budget as a
 //! plain lamport balance (funded by the sponsor); `rent_min` is `0` because the
 //! ephemeral account's rent lives in the Magic vault, not in the account.
 //!
@@ -16,7 +18,7 @@ use hydra_api::{
     consts::{ephemeral, REMAINING_INFINITE},
     program::{
         helpers::{get_clock_slot, get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
-        processor::verify_followup,
+        processor::{verify_delegated_followup, verify_followup},
     },
     state::{load_crank, load_crank_mut},
     HydraError,
@@ -72,7 +74,12 @@ pub fn process(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResult {
         .checked_sub(reward)
         .ok_or::<ProgramError>(HydraError::InsufficientFunds.into())?;
 
-    verify_followup(ix_sysvar_ai, crank_ai, region_len as usize)?;
+    // Cranks replay their scheduled ixs verbatim. A crank with a PDA signer
+    // cannot, so the Crank program executes it instead; only checked when the
+    // verbatim replay does not match, so other cranks pay nothing extra.
+    if let Err(err) = verify_followup(ix_sysvar_ai, crank_ai, region_len as usize) {
+        verify_delegated_followup(ix_sysvar_ai, crank_ai).map_err(|_| err)?;
+    }
 
     // Pay the cranker via direct lamport mutation.
     crank_ai.set_lamports(new_crank_lamports);
